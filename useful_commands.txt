@@ -1,0 +1,17 @@
+Launch training humanoid:
+    uv run ./scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0 --headless
+
+Launch training biped:
+    uv run ./scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-Biped-v0 --headless
+
+Get .onnx file (to be killed after "policy_latest.yaml" inside configs is created):
+    uv run ./scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-v0 --num_envs 1 --headless
+    uv run ./scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-Biped-v0 --num_envs 1 --headless
+
+    remember to rename the new yaml file after conversion to save it
+
+Launch sim2sim (MuJoCo), last training:
+    uv run ./scripts/sim2sim/play_mujoco.py --config ./configs/policy_latest.yaml
+
+Launch sim2sim (MuJoCo), specific model:
+    uv run ./scripts/sim2sim/play_mujoco.py --config ./configs/policy_Mina_loc_vel.yaml

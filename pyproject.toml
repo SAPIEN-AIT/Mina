@@ -147,3 +147,6 @@ explicit = true
 name = "nvidia"
 url = "https://pypi.nvidia.com"
 explicit = true
+
+[tool.uv.extra-build-dependencies]
+flatdict = ["setuptools"]

@@ -63,7 +63,8 @@ class LocomotionVelocityEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the locomotion velocity-tracking environment."""
 
     # Scene settings
-    scene: FlatTerrainSceneCfg = FlatTerrainSceneCfg(num_envs=4096, env_spacing=2.5)
+    # scene: FlatTerrainSceneCfg = FlatTerrainSceneCfg(num_envs=4096, env_spacing=2.5)
+    scene: FlatTerrainSceneCfg = FlatTerrainSceneCfg(num_envs=2048, env_spacing=2.5)
 
     def __post_init__(self):
         """Post initialization."""

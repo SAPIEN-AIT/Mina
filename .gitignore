@@ -34,3 +34,19 @@ _isaac_sim*
 _repo
 _build
 .lastformat
+
+# --- Custom user additions ---
+
+# Ignore heavy C/C++ Intellisense databases inside .vscode
+.vscode/*.db
+.vscode/*.db-shm
+.vscode/*.db-wal
+
+# Ignore personal VS Code settings
+.vscode/settings.json
+.vscode/c_cpp_properties.json
+
+# Ignore heavy neural network binaries and checkpoint folders
+# **/checkpoints/
+# *.onnx
+*.pt
