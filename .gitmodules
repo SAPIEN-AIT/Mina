@@ -4,3 +4,9 @@
 [submodule "source/berkeley_humanoid_lite_lowlevel"]
 	path = source/berkeley_humanoid_lite_lowlevel
 	url = git@github.com:HybridRobotics/Berkeley-Humanoid-Lite-Lowlevel.git
+[submodule "source/mina_teleop"]
+	path = source/mina_teleop
+	url = https://github.com/DariusGiannoli/mina-teleop
+[submodule "source/mina_il"]
+	path = source/mina_il
+	url = https://github.com/DariusGiannoli/mina-il
