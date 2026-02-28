@@ -1,42 +1,57 @@
-"""Monocular MediaPipe → ArmSim teleoperation (right arm).
+"""Bimanual MediaPipe → ArmSim teleoperation (both arms).
 
 Reads the Mac webcam via MediaPipe Pose in a background thread and drives
-the right arm of the Berkeley Humanoid Lite arm simulation in real time.
+both arms of the Berkeley Humanoid Lite arm simulation in real time.
 
-Controls
---------
-    c   Calibrate neutral pose (hold arms relaxed at your sides, then press c)
-    q   Quit
+Both arms are extracted from a single MediaPipe inference per frame —
+no duplicate camera processing.
+
+Calibration
+-----------
+  Auto-calibration: hold both arms relaxed at your sides. The script counts
+  down 3 seconds then captures the neutral pose automatically.
+
+  Manual re-calibration: type  c + Enter  in the terminal at any time.
+  Type  q + Enter  to stop the teleop (MuJoCo window stays open).
 
 Usage
 -----
-    python scripts/teleop/teleop_sim_mediapipe.py [--side right|left] [--camera 0]
-    python scripts/teleop/teleop_sim_mediapipe.py --kp 25 --kd 2.5
+    mjpython scripts/teleop/teleop_sim_mediapipe.py
+    mjpython scripts/teleop/teleop_sim_mediapipe.py --countdown 5 --smoothing 0.8
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import threading
+import time
 from pathlib import Path
 
-import cv2
 import numpy as np
 
-# Allow running from repo root without install
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "source" / "mina_teleop"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from mina_teleop.pose.arm_retargeter import ArmRetargeter
-from mina_teleop.pose.mediapipe_estimator import MediaPipeArmEstimator
-
-from scripts.teleop.sim_arm import ArmSim, ArmSimConfig
-
 # ---------------------------------------------------------------------------
-# Arm index offsets per side
+# Path setup — allows running from repo root without install
 # ---------------------------------------------------------------------------
 
-_JOINT_OFFSET = {"left": 0, "right": 5}
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT / "source" / "mina_teleop"))
+sys.path.insert(0, str(_REPO_ROOT / "scripts" / "teleop"))
+
+from mina_teleop.pose.arm_retargeter import BimanualRetargeter
+from mina_teleop.pose.mediapipe_estimator import BimanualArmEstimator
+from sim_arm import ArmSim, ArmSimConfig
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_PRINT_DT = 1.0 / 5.0   # terminal refresh at 5 Hz
+
+_LABELS = [
+    "L sh_pitch", "L sh_roll ", "L sh_yaw  ", "L el_pitch", "L el_roll ",
+    "R sh_pitch", "R sh_roll ", "R sh_yaw  ", "R el_pitch", "R el_roll ",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -45,104 +60,114 @@ _JOINT_OFFSET = {"left": 0, "right": 5}
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="MediaPipe monocular teleoperation → ArmSim",
+        description="Bimanual MediaPipe teleoperation → ArmSim",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--side",   default="right", choices=["right", "left"])
-    parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--kp",     type=float, default=20.0)
-    parser.add_argument("--kd",     type=float, default=2.0)
-    parser.add_argument("--smoothing", type=float, default=0.7,
-                        help="EMA smoothing (0=none, 0.9=heavy)")
+    parser.add_argument("--camera",    type=int,   default=0)
+    parser.add_argument("--kp",        type=float, default=20.0)
+    parser.add_argument("--kd",        type=float, default=2.0)
+    parser.add_argument("--smoothing", type=float, default=0.7)
+    parser.add_argument("--countdown", type=int,   default=3,
+                        help="Seconds before auto-calibration at launch")
     args = parser.parse_args()
 
-    # --- MediaPipe estimator (background thread) ---
-    estimator = MediaPipeArmEstimator(side=args.side, camera_id=args.camera)
+    # ------------------------------------------------------------------
+    # Components
+    # ------------------------------------------------------------------
+
+    estimator  = BimanualArmEstimator(camera_id=args.camera)
+    retargeter = BimanualRetargeter(smoothing=args.smoothing)
+    sim        = ArmSim(ArmSimConfig(kp=args.kp, kd=args.kd))
+
     estimator.start()
 
-    # --- Retargeter ---
-    retargeter = ArmRetargeter(side=args.side, smoothing=args.smoothing)
+    # ------------------------------------------------------------------
+    # Shared state
+    # ------------------------------------------------------------------
 
-    # --- Sim ---
-    sim_cfg = ArmSimConfig(kp=args.kp, kd=args.kd)
-    sim = ArmSim(sim_cfg)
+    state = {
+        "calibrated":          False,
+        "calibrate_requested": False,
+        "latest_targets":      np.zeros(10),
+        "last_print":          0.0,
+        "active":              True,
+    }
 
-    joint_offset = _JOINT_OFFSET[args.side]
+    # ------------------------------------------------------------------
+    # Background threads
+    # ------------------------------------------------------------------
 
-    # Shared state — written by callback, read by display loop
-    _latest_angles: np.ndarray = np.zeros(5)
-    _calibrated: bool = False
+    def _auto_calibrate() -> None:
+        print("\n[teleop] Hold BOTH arms relaxed at your sides.")
+        for i in range(args.countdown, 0, -1):
+            print(f"[teleop] Calibrating in {i}…")
+            time.sleep(1.0)
 
-    print(
-        "\n[teleop_sim_mediapipe]"
-        "\n  Press  c  in the OpenCV window to calibrate neutral pose"
-        "\n  Press  q  in the OpenCV window to quit\n"
-    )
-
-    # --- Teleoperation callback (runs at sim rate, ~500 Hz) ---
-    def teleop_callback(s: ArmSim) -> None:
-        nonlocal _latest_angles, _calibrated
-
-        lm = estimator.get_landmarks()
-        if lm is None:
-            return
-
-        if not _calibrated:
-            # Hold at zero until the user calibrates
-            return
-
-        angles = retargeter.retarget(lm)
-        _latest_angles = angles
-
-        targets = np.zeros(10)
-        targets[joint_offset : joint_offset + 5] = angles
-        s.set_joint_targets(targets)
-
-    # --- Display loop (runs alongside sim in same thread via OpenCV poll) ---
-    # We launch the sim in a background thread so we can poll the OpenCV
-    # window for keypresses on the main thread.
-    import threading
-
-    sim_done = threading.Event()
-
-    def sim_thread() -> None:
-        sim.run(teleop_callback=teleop_callback)
-        sim_done.set()
-
-    t = threading.Thread(target=sim_thread, daemon=True)
-    t.start()
-
-    while not sim_done.is_set():
-        frame = estimator.get_debug_frame()
-        if frame is not None:
-            # Overlay current joint angles
-            labels = ["sh_pitch", "sh_roll", "sh_yaw", "el_pitch", "el_roll"]
-            for i, (label, val) in enumerate(zip(labels, _latest_angles)):
-                text = f"{label}: {val:+.2f} rad"
-                color = (0, 255, 0) if _calibrated else (0, 180, 255)
-                cv2.putText(frame, text, (10, 25 + i * 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
-
-            status = "CALIBRATED" if _calibrated else "Press 'c' to calibrate"
-            cv2.putText(frame, status, (10, frame.shape[0] - 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (0, 255, 0) if _calibrated else (0, 100, 255), 2)
-
-            cv2.imshow("MediaPipe Teleop", frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        elif key == ord("c"):
+        while state["active"]:
             lm = estimator.get_landmarks()
             if lm is not None:
                 retargeter.calibrate(lm)
-                _calibrated = True
-            else:
-                print("[teleop] No landmarks detected — move into camera view first.")
+                state["calibrated"] = True
+                print("[teleop] ✓ Calibrated — move your arms to control the sim.\n")
+                return
+            time.sleep(0.05)
 
-    cv2.destroyAllWindows()
-    estimator.stop()
+    def _keyboard_listener() -> None:
+        print("[teleop] Commands:  c + Enter = recalibrate   |   q + Enter = stop teleop\n")
+        while state["active"]:
+            try:
+                cmd = input().strip().lower()
+            except EOFError:
+                break
+            if cmd == "c":
+                state["calibrate_requested"] = True
+            elif cmd == "q":
+                state["active"] = False
+                print("[teleop] Teleop stopped. Close the MuJoCo window to fully exit.")
+
+    threading.Thread(target=_auto_calibrate,    daemon=True).start()
+    threading.Thread(target=_keyboard_listener, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Teleoperation callback — runs on main thread at ~500 Hz
+    # ------------------------------------------------------------------
+
+    def teleop_callback(s: ArmSim) -> None:
+        if not state["active"]:
+            return
+
+        lm = estimator.get_landmarks()
+
+        if state["calibrate_requested"] and lm is not None:
+            retargeter.calibrate(lm)
+            state["calibrated"] = True
+            state["calibrate_requested"] = False
+            print("[teleop] ✓ Recalibrated.")
+
+        if lm is not None and state["calibrated"]:
+            targets = retargeter.retarget(lm)
+            state["latest_targets"] = targets
+            s.set_joint_targets(targets)
+
+        now = time.perf_counter()
+        if state["calibrated"] and now - state["last_print"] >= _PRINT_DT:
+            state["last_print"] = now
+            t = state["latest_targets"]
+            left  = "  ".join(f"{l}:{v:+.2f}" for l, v in zip(_LABELS[:5],  t[:5]))
+            right = "  ".join(f"{l}:{v:+.2f}" for l, v in zip(_LABELS[5:], t[5:]))
+            print(f"\r[L] {left}", end="\n", flush=True)
+            print(f"[R] {right}", end="\033[1A", flush=True)  # move cursor up 1 line
+
+    # ------------------------------------------------------------------
+    # Run — blocks on main thread (required by GLFW/macOS)
+    # ------------------------------------------------------------------
+
+    try:
+        sim.run(teleop_callback=teleop_callback)
+    finally:
+        state["active"] = False
+        estimator.stop()
+        print("\n")
 
 
 if __name__ == "__main__":
