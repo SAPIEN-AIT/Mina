@@ -10,3 +10,6 @@
 [submodule "source/mina_il"]
 	path = source/mina_il
 	url = git@github.com:SAPIEN-AIT/mina-il.git
+[submodule "source/mina_assets"]
+	path = source/mina_assets
+	url = git@github.com:SAPIEN-AIT/mina-assets.git

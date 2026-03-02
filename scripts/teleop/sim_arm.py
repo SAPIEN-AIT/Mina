@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,12 +45,17 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
+# Path setup — allows running from repo root without install
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT / "source" / "mina_assets"))
+
+from mina_assets import ARM_SCENE
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SCENE = _REPO_ROOT / "mjcf/bhl_arm_scene.xml"
+DEFAULT_SCENE = ARM_SCENE
 
 # ---------------------------------------------------------------------------
 # Joint definitions
