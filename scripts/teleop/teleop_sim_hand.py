@@ -1,46 +1,37 @@
-"""LEAP hand teleoperation via ZED stereo camera + MediaPipe Hands.
-
-Streams a ZED camera in a background thread, runs two MediaPipe Hands
-instances (one per view), and drives the LEAP hand MuJoCo simulation in
-real time via the teleop_callback pattern.
+"""LEAP hand teleoperation — ZED stereo + MediaPipe Hands → HandSim.
 
 Architecture
 ------------
-[Camera thread ~30 Hz]                [Sim main thread 200 Hz]
-  ZEDCamera.get_frames()               HandSim run loop
-  → StereoHandDetector.process()         → teleop_callback(sim)
-  → write to _obs (Lock)                   → read _obs (non-blocking)
-                                           → LeapRetargeter.retarget()
-                                           → sim.set_finger_targets()
-                                           → sim.set_wrist_pos()
+[Camera thread ~30 Hz]                   [Sim main thread 200 Hz]
+  ZEDCamera.get_frames()                   HandSim run loop
+  → StereoHandDetector.process_raw()         → teleop_callback(sim)
+  → stereo_hand_3d()  (if STEREO_DEPTH)        → IKRetargeter.retarget(lm)
+  → draw skeleton on preview                   → palm_quat(lm)
+  → send JPEG to _camera_viewer subprocess     → sim.set_finger_targets()
+  → write to _SharedBuf (Lock)                 → sim.set_wrist_pos/quat()
 
-Wrist position
---------------
-MediaPipe world landmarks are rooted at the wrist in a hand-relative
-metric frame — they do not give absolute camera-frame position.
-Currently the wrist is fixed at a default world position.
-TODO: integrate stereo_capture.py triangulation for 3-D wrist tracking.
-
-Prerequisites
--------------
-1. Copy LEAP MJCF assets from Binocular-Teleop into this repo::
-
-       git clone https://github.com/SAPIEN-AIT/Binocular-Teleop /tmp/binocularteleop
-       cp -r /tmp/binocularteleop/robots/leap_hand /path/to/Mina/mjcf/
-
-2. ZED camera connected (or pass --camera with a regular webcam index).
+Wrist orientation calibration
+------------------------------
+Press **A** in the MuJoCo viewer to snapshot the current palm orientation
+as the neutral reference.  All subsequent frames express orientation as a
+rotation relative to that snapshot.
 
 Usage
 -----
     mjpython scripts/teleop/teleop_sim_hand.py
-    mjpython scripts/teleop/teleop_sim_hand.py --camera 1 --scale 0.8
+    mjpython scripts/teleop/teleop_sim_hand.py --camera 1 --no-preview
 
 Run with mjpython (required on macOS for GLFW thread safety).
+
+Port of Binocular-Teleop/teleop_leap.py (Edgard, SAPIEN-AIT).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import struct
+import subprocess
 import sys
 import threading
 import time
@@ -55,54 +46,143 @@ import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "source" / "mina_teleop"))
+sys.path.insert(0, str(_REPO_ROOT / "source" / "mina_assets"))
 
 from mina_teleop.environments.mujoco_hand import HandSim, HandSimConfig
 from mina_teleop.inputs.vision.hand_detector import StereoHandDetector
+from mina_teleop.inputs.vision.stereo_capture import ZED2I, stereo_hand_3d
 from mina_teleop.inputs.vision.zed_engine import ZEDCamera
-from mina_teleop.retargeters.hand import LeapRetargeter
+from mina_teleop.processing.one_euro_filter import OneEuroFilter
+from mina_teleop.retargeters.hand import IKRetargeter, palm_quat
 
 # ---------------------------------------------------------------------------
-# Constants
+# Tuning constants
 # ---------------------------------------------------------------------------
 
-_PRINT_DT = 1.0 / 5.0   # terminal readout at 5 Hz
+# Toggle to False for desk testing without a ZED: wrist stays at _FIXED_WRIST_POS
+STEREO_DEPTH: bool = True
 
-# Default wrist position in world frame (metres).
-# Adjust to place the hand at a comfortable location in the scene.
-_DEFAULT_WRIST_POS = np.array([0.0, 0.3, 0.3])
+# Camera-frame → world-frame offset applied after axis remapping.
+# Tune so the simulated hand appears at a comfortable height/depth.
+_CAM_TO_WORLD_OFFSET = np.array([0.0, 0.0, 0.30])   # metres
+
+# Used when STEREO_DEPTH is False
+_FIXED_WRIST_POS = np.array([0.0, 0.30, 0.45])
+
+# One Euro Filter tuning for 16 finger joint outputs
+_JOINT_CUTOFF = 1.5   # Hz — lower = smoother but laggier
+_JOINT_BETA   = 0.3   # higher = more responsive on fast motion
+
+# GLFW keycode for 'A' (calibrate wrist orientation)
+_GLFW_KEY_A = 65
+
+_PRINT_DT = 0.20   # seconds between terminal status lines
+
+_CAMERA_VIEWER = _REPO_ROOT / "scripts" / "teleop" / "_camera_viewer.py"
 
 _JOINT_NAMES = [
-    "idx_mcp", "idx_pip", "idx_dip", "idx_abd",
-    "mid_mcp", "mid_pip", "mid_dip", "mid_abd",
-    "rng_mcp", "rng_pip", "rng_dip", "rng_abd",
-    "thb_cmc", "thb_axl", "thb_mcp", "thb_ip ",
+    "if_mcp", "if_rot", "if_pip", "if_dip",
+    "mf_mcp", "mf_rot", "mf_pip", "mf_dip",
+    "rf_mcp", "rf_rot", "rf_pip", "rf_dip",
+    "th_cmc", "th_axl", "th_mcp", "th_ipl",
 ]
 
 
 # ---------------------------------------------------------------------------
-# Shared detection buffer
+# Quaternion helpers (w, x, y, z convention — MuJoCo)
 # ---------------------------------------------------------------------------
 
-class _DetectionBuffer:
-    """Thread-safe buffer for the latest stereo hand observation."""
+def _qconj(q: np.ndarray) -> np.ndarray:
+    return np.array([q[0], -q[1], -q[2], -q[3]])
+
+
+def _qmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return np.array([
+        aw*bw - ax*bx - ay*by - az*bz,
+        aw*bx + ax*bw + ay*bz - az*by,
+        aw*by - ax*bz + ay*bw + az*bx,
+        aw*bz + ax*by - ay*bx + az*bw,
+    ])
+
+
+def _qnorm(q: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(q)
+    return q / n if n > 1e-8 else q
+
+
+# ---------------------------------------------------------------------------
+# Camera-frame → world-frame position mapping
+# ---------------------------------------------------------------------------
+
+def _cam_to_world(pos3d: np.ndarray) -> np.ndarray:
+    """Map ``stereo_hand_3d`` output to MuJoCo world coordinates.
+
+    ``stereo_hand_3d`` returns [X, Y, Z] where:
+        X > 0  → right of camera
+        Y > 0  → below  camera  (camera Y points down)
+        Z > 0  → in front of camera
+
+    MuJoCo world frame:
+        +X → right,  +Y → forward,  +Z → up
+    """
+    world_x = -pos3d[0]   # mirror left-right for right-hand view
+    world_y =  pos3d[2]   # camera forward  → world forward
+    world_z = -pos3d[1]   # camera downward → invert for world up
+    return np.array([world_x, world_y, world_z]) + _CAM_TO_WORLD_OFFSET
+
+
+# ---------------------------------------------------------------------------
+# Camera viewer subprocess helpers
+# ---------------------------------------------------------------------------
+
+def _send_frame(proc: subprocess.Popen, frame_bgr: np.ndarray) -> None:
+    """Encode ``frame_bgr`` as JPEG and write to viewer subprocess stdin."""
+    ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if not ok:
+        return
+    data = buf.tobytes()
+    with contextlib.suppress(OSError):
+        proc.stdin.write(struct.pack(">I", len(data)))
+        proc.stdin.write(data)
+        proc.stdin.flush()
+
+
+def _shutdown_viewer(proc: subprocess.Popen) -> None:
+    """Send the zero-length shutdown frame and wait for the process to exit."""
+    with contextlib.suppress(OSError):
+        proc.stdin.write(struct.pack(">I", 0))
+        proc.stdin.flush()
+        proc.stdin.close()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+# ---------------------------------------------------------------------------
+# Thread-safe shared buffer
+# ---------------------------------------------------------------------------
+
+class _SharedBuf:
+    """Passes latest detection results from camera thread to sim callback."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._landmarks: np.ndarray | None = None   # (21, 3)
-        self._frame: np.ndarray | None = None        # annotated left frame
+        self._lm = None                              # raw MediaPipe landmark list
+        self._wrist_cam: np.ndarray | None = None   # [X,Y,Z] camera frame
 
-    def write(
-        self,
-        landmarks: np.ndarray | None,
-        frame: np.ndarray | None,
-    ) -> None:
+    def write(self, lm, wrist_cam: np.ndarray | None) -> None:
         with self._lock:
-            self._landmarks = landmarks
-            self._frame = frame
+            self._lm       = lm
+            self._wrist_cam = wrist_cam
 
-    def read(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def read(self) -> tuple:
         with self._lock:
-            return self._landmarks, self._frame
+            return self._lm, (
+                None if self._wrist_cam is None else self._wrist_cam.copy()
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -114,30 +194,55 @@ def main() -> None:
         description="LEAP hand ZED+MediaPipe teleoperation → HandSim",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--camera", type=int,   default=0,
-                        help="OpenCV camera device index for the ZED")
-    parser.add_argument("--y-offset", type=int, default=0,
-                        help="Vertical pixel offset for right ZED frame")
-    parser.add_argument("--scale",  type=float, default=1.0,
-                        help="Global retargeter output scale [0, 1]")
-    parser.add_argument("--physics-hz", type=float, default=200.0)
+    parser.add_argument("--camera",     type=int,   default=0,
+                        help="OpenCV device index (ZED shows as a wide-format UVC device)")
+    parser.add_argument("--y-offset",   type=int,   default=0,
+                        help="Vertical pixel shift for right ZED frame")
+    parser.add_argument("--physics-hz", type=float, default=200.0,
+                        help="Physics simulation rate in Hz")
     parser.add_argument("--no-preview", action="store_true",
-                        help="Disable OpenCV skeleton preview window")
+                        help="Disable the _camera_viewer subprocess")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
-    # Components
+    # Build components
     # ------------------------------------------------------------------
 
-    camera   = ZEDCamera(camera_id=args.camera, y_offset=args.y_offset)
-    detector = StereoHandDetector(max_hands=1)
-    retargeter = LeapRetargeter(scale=args.scale)
-    sim      = HandSim(HandSimConfig(physics_hz=args.physics_hz))
+    camera     = ZEDCamera(camera_id=args.camera, y_offset=args.y_offset)
+    detector   = StereoHandDetector(max_hands=1)
+    retargeter = IKRetargeter()
+    sim        = HandSim(HandSimConfig(physics_hz=args.physics_hz))
+    buf        = _SharedBuf()
 
-    buf = _DetectionBuffer()
+    # Per-DOF One Euro Filters for smooth finger output
+    joint_filters = [
+        OneEuroFilter(min_cutoff=_JOINT_CUTOFF, beta=_JOINT_BETA)
+        for _ in range(16)
+    ]
 
     # ------------------------------------------------------------------
-    # Camera thread — ~30 Hz
+    # Camera viewer subprocess (separate process — avoids cv2/Cocoa crash)
+    # ------------------------------------------------------------------
+
+    viewer_proc: subprocess.Popen | None = None
+    if not args.no_preview:
+        viewer_proc = subprocess.Popen(
+            [sys.executable, str(_CAMERA_VIEWER)],
+            stdin=subprocess.PIPE,
+        )
+
+    # ------------------------------------------------------------------
+    # Calibration state
+    # ------------------------------------------------------------------
+
+    _cal: dict = {
+        "pending":  False,
+        "cal_quat": None,                        # palm_quat at calibration
+        "start_q":  sim.cfg.start_quat.copy(),   # target at calibration pose
+    }
+
+    # ------------------------------------------------------------------
+    # Camera thread (~30 Hz)
     # ------------------------------------------------------------------
 
     active = {"flag": True}
@@ -151,104 +256,136 @@ def main() -> None:
                 time.sleep(0.1)
                 continue
 
-            obs = detector.process(left, right)
+            res_l, res_r = detector.process_raw(left, right)
 
-            # Prefer left camera landmarks for retargeting; fall back to right
-            landmarks = None
-            if obs.left_cam is not None and obs.left_cam.valid:
-                landmarks = obs.left_cam.points
-            elif obs.right_cam is not None and obs.right_cam.valid:
-                landmarks = obs.right_cam.points
+            # Raw landmark list (protobuf) — prefer left camera
+            lm = None
+            if res_l and res_l.multi_hand_landmarks:
+                lm = res_l.multi_hand_landmarks[0].landmark
 
-            # Annotated preview frame (left view)
-            if not args.no_preview:
-                preview = left.copy()
-                detected = landmarks is not None
-                color = (0, 220, 0) if detected else (0, 60, 220)
-                label = "Hand detected" if detected else "No hand"
-                cv2.putText(
-                    preview, label, (12, 32),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2,
+            # Stereo wrist depth
+            wrist_cam: np.ndarray | None = None
+            if STEREO_DEPTH and lm is not None:
+                lm_r = (
+                    res_r.multi_hand_landmarks[0].landmark
+                    if res_r and res_r.multi_hand_landmarks
+                    else None
                 )
-                buf.write(landmarks, preview)
-            else:
-                buf.write(landmarks, None)
+                if lm_r is not None:
+                    h, w = left.shape[:2]
+                    wrist_cam = stereo_hand_3d(lm, lm_r, frame_w=w, frame_h=h, cam=ZED2I)
+
+            buf.write(lm, wrist_cam)
+
+            # Preview frame
+            if viewer_proc is not None and viewer_proc.poll() is None:
+                preview = np.hstack([left, right])
+                # Draw skeleton on left half
+                if lm is not None:
+                    detector.draw_landmarks(preview[:, :left.shape[1]], res_l)
+                # Status overlay
+                detected = lm is not None
+                cv2.putText(
+                    preview,
+                    "Hand detected" if detected else "No hand",
+                    (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                    (0, 220, 0) if detected else (0, 60, 220), 2,
+                )
+                if wrist_cam is not None:
+                    wp = _cam_to_world(wrist_cam)
+                    cv2.putText(
+                        preview,
+                        f"wrist [{wp[0]:+.2f}  {wp[1]:+.2f}  {wp[2]:+.2f}]",
+                        (12, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 0), 2,
+                    )
+                _send_frame(viewer_proc, preview)
 
     threading.Thread(target=_camera_loop, daemon=True).start()
 
     # ------------------------------------------------------------------
-    # Keyboard listener thread
+    # GLFW key callback — called from the MuJoCo viewer main loop
     # ------------------------------------------------------------------
 
-    def _keyboard_listener() -> None:
-        print("[teleop] Commands:  q + Enter = stop\n")
-        while active["flag"]:
-            try:
-                cmd = input().strip().lower()
-            except EOFError:
-                break
-            if cmd == "q":
-                active["flag"] = False
-                print("[teleop] Stopping… close the MuJoCo window to exit.")
-
-    threading.Thread(target=_keyboard_listener, daemon=True).start()
+    def _key_callback(keycode: int) -> None:
+        if keycode == _GLFW_KEY_A:
+            _cal["pending"] = True
+            print("[teleop] Calibration queued — hold hand in neutral pose.")
 
     # ------------------------------------------------------------------
-    # Teleoperation callback — runs on main thread at physics_hz
+    # Teleoperation callback — runs on sim main thread at physics_hz
     # ------------------------------------------------------------------
 
-    last_print = [0.0]
-    last_targets = [np.zeros(16)]
+    _last_print = [0.0]
+    _last_q     = [np.zeros(16)]
 
     def teleop_callback(s: HandSim) -> None:
-        if not active["flag"]:
+        lm, wrist_cam = buf.read()
+
+        if lm is None:
             return
 
-        landmarks, frame = buf.read()
-
-        if landmarks is not None:
-            targets = retargeter.retarget(landmarks)
-            last_targets[0] = targets
-            s.set_finger_targets(targets)
-
-        # Wrist fixed at default until stereo triangulation is available
-        s.set_wrist_pos(_DEFAULT_WRIST_POS)
-
-        # Show OpenCV preview (non-blocking)
-        if not args.no_preview and frame is not None:
-            cv2.imshow("LEAP Hand Teleop — left view", frame)
-            cv2.waitKey(1)
-
-        # Terminal readout at 5 Hz
         now = time.perf_counter()
-        if now - last_print[0] >= _PRINT_DT:
-            last_print[0] = now
-            detected = "✓ hand" if landmarks is not None else "✗ no hand"
-            t = last_targets[0]
-            row1 = "  ".join(f"{n}:{v:+.2f}" for n, v in zip(_JOINT_NAMES[:8],  t[:8]))
-            row2 = "  ".join(f"{n}:{v:+.2f}" for n, v in zip(_JOINT_NAMES[8:], t[8:]))
-            print(f"\r[{detected}]  {row1}", flush=True)
-            print(f"             {row2}", end="\033[1A", flush=True)
+
+        # 1. Finger joint angles (retarget + smooth)
+        raw_q = retargeter.retarget(lm)
+        for i in range(16):
+            raw_q[i] = joint_filters[i].apply(raw_q[i], now)
+        _last_q[0] = raw_q
+        s.set_finger_targets(raw_q)
+
+        # 2. Wrist orientation
+        curr_q = _qnorm(palm_quat(lm))
+
+        if _cal["pending"]:
+            _cal["cal_quat"] = curr_q.copy()
+            _cal["pending"]  = False
+            print(f"[teleop] Calibrated  cal_q = {curr_q.round(3)}")
+
+        if _cal["cal_quat"] is not None:
+            # Relative rotation from calibration pose → apply to start orientation
+            q_rel = _qmul(_qconj(_cal["cal_quat"]), curr_q)
+            wrist_q = _qnorm(_qmul(_cal["start_q"], q_rel))
+        else:
+            wrist_q = curr_q
+
+        s.set_wrist_quat(wrist_q)
+
+        # 3. Wrist position
+        if STEREO_DEPTH and wrist_cam is not None:
+            s.set_wrist_pos(_cam_to_world(wrist_cam))
+        else:
+            s.set_wrist_pos(_FIXED_WRIST_POS)
+
+        # 4. Terminal readout
+        if now - _last_print[0] >= _PRINT_DT:
+            _last_print[0] = now
+            q   = _last_q[0]
+            r1  = "  ".join(f"{n}:{v:+.2f}" for n, v in zip(_JOINT_NAMES[:8],  q[:8]))
+            r2  = "  ".join(f"{n}:{v:+.2f}" for n, v in zip(_JOINT_NAMES[8:], q[8:]))
+            cal = " [CAL]" if _cal["cal_quat"] is not None else "      "
+            print(f"\r[hand ✓{cal}]  {r1}", flush=True)
+            print(f"              {r2}", end="\033[1A", flush=True)
 
     # ------------------------------------------------------------------
-    # Run — blocks on main thread (GLFW/macOS requirement)
+    # Launch — blocks on main thread (GLFW / macOS requirement)
     # ------------------------------------------------------------------
 
     print(
         "\n[teleop] LEAP Hand simulation starting…\n"
-        f"  Camera  : {args.camera}  (ZED stereo)\n"
-        f"  Scale   : {args.scale}\n"
-        f"  Preview : {'off' if args.no_preview else 'on'}\n"
+        f"  Camera      : {args.camera}  (ZED SBS → split left/right)\n"
+        f"  Stereo depth: {'on' if STEREO_DEPTH else 'off — fixed wrist pos'}\n"
+        f"  Preview     : {'off' if args.no_preview else 'subprocess (_camera_viewer.py)'}\n"
+        "\n  Press A in the MuJoCo viewer to calibrate wrist orientation.\n"
     )
 
     try:
-        sim.run(teleop_callback=teleop_callback)
+        sim.run(teleop_callback=teleop_callback, key_callback=_key_callback)
     finally:
         active["flag"] = False
         detector.close()
         camera.close()
-        if not args.no_preview:
-            cv2.destroyAllWindows()
+        if viewer_proc is not None:
+            _shutdown_viewer(viewer_proc)
         print("\n[teleop] Done.")
 
 
