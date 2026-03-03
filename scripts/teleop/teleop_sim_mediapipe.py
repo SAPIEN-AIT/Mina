@@ -38,8 +38,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "source" / "mina_teleop"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "teleop"))
 
-from mina_teleop.pose.arm_retargeter import BimanualRetargeter
-from mina_teleop.pose.mediapipe_estimator import BimanualArmEstimator
+from mina_teleop.retargeters.arm import BimanualRetargeter
+from mina_teleop.inputs.vision.mediapipe_engine import BimanualArmEstimator
 from sim_arm import ArmSim, ArmSimConfig
 
 # ---------------------------------------------------------------------------
