@@ -44,15 +44,16 @@ import numpy as np
 # Path setup — allows running from repo root without install
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT / "source" / "mina_teleop"))
 sys.path.insert(0, str(_REPO_ROOT / "source" / "mina_assets"))
 
 from mina_teleop.environments.mujoco_hand import HandSim, HandSimConfig
 from mina_teleop.inputs.vision.hand_detector import StereoHandDetector
-from mina_teleop.inputs.vision.stereo_capture import ZED2I, stereo_hand_3d
+from mina_teleop.inputs.vision.stereo_depth import ZED2I, stereo_hand_3d
 from mina_teleop.inputs.vision.zed_engine import ZEDCamera
 from mina_teleop.processing.one_euro_filter import OneEuroFilter
+from mina_teleop.processing.velocity_limiter import VelocityLimiter
 from mina_teleop.retargeters.hand import IKRetargeter, palm_quat
 
 # ---------------------------------------------------------------------------
@@ -73,12 +74,16 @@ _FIXED_WRIST_POS = np.array([0.0, 0.30, 0.45])
 _JOINT_CUTOFF = 1.5   # Hz — lower = smoother but laggier
 _JOINT_BETA   = 0.3   # higher = more responsive on fast motion
 
-# GLFW keycode for 'A' (calibrate wrist orientation)
-_GLFW_KEY_A = 65
+# VelocityLimiter for finger joints
+_FINGER_MAX_RAD_PER_SEC = 6.0  # generous — fingers are fast, but prevents snap on tracking loss
+
+# GLFW keycodes
+_GLFW_KEY_A = 65   # calibrate wrist orientation
+_GLFW_KEY_R = 82   # reset hand to start pose
 
 _PRINT_DT = 0.20   # seconds between terminal status lines
 
-_CAMERA_VIEWER = _REPO_ROOT / "scripts" / "teleop" / "_camera_viewer.py"
+_CAMERA_VIEWER = Path(__file__).resolve().parent / "_camera_viewer.py"
 
 _JOINT_NAMES = [
     "if_mcp", "if_rot", "if_pip", "if_dip",
@@ -219,6 +224,7 @@ def main() -> None:
         OneEuroFilter(min_cutoff=_JOINT_CUTOFF, beta=_JOINT_BETA)
         for _ in range(16)
     ]
+    finger_limiter = VelocityLimiter(max_rad_per_sec=_FINGER_MAX_RAD_PER_SEC, n_joints=16)
 
     # ------------------------------------------------------------------
     # Camera viewer subprocess (separate process — avoids cv2/Cocoa crash)
@@ -236,9 +242,10 @@ def main() -> None:
     # ------------------------------------------------------------------
 
     _cal: dict = {
-        "pending":  False,
-        "cal_quat": None,                        # palm_quat at calibration
-        "start_q":  sim.cfg.start_quat.copy(),   # target at calibration pose
+        "pending":       False,
+        "reset_pending": False,
+        "cal_quat":      None,                        # palm_quat at calibration
+        "start_q":       sim.cfg.start_quat.copy(),   # target at calibration pose
     }
 
     # ------------------------------------------------------------------
@@ -279,10 +286,10 @@ def main() -> None:
 
             # Preview frame
             if viewer_proc is not None and viewer_proc.poll() is None:
-                preview = np.hstack([left, right])
-                # Draw skeleton on left half
+                # Draw skeleton on left frame before hstack (slice is non-contiguous)
                 if lm is not None:
-                    detector.draw_landmarks(preview[:, :left.shape[1]], res_l)
+                    detector.draw_landmarks(left, res_l)
+                preview = np.hstack([left, right])
                 # Status overlay
                 detected = lm is not None
                 cv2.putText(
@@ -310,15 +317,30 @@ def main() -> None:
         if keycode == _GLFW_KEY_A:
             _cal["pending"] = True
             print("[teleop] Calibration queued — hold hand in neutral pose.")
+        elif keycode == _GLFW_KEY_R:
+            _cal["reset_pending"] = True
+            print("[teleop] Reset queued — returning to start pose.")
 
     # ------------------------------------------------------------------
     # Teleoperation callback — runs on sim main thread at physics_hz
     # ------------------------------------------------------------------
 
-    _last_print = [0.0]
-    _last_q     = [np.zeros(16)]
+    _last_print  = [0.0]
+    _last_q      = [np.zeros(16)]
+    _last_cb_t   = [0.0]
 
     def teleop_callback(s: HandSim) -> None:
+        if _cal["reset_pending"]:
+            _cal["reset_pending"] = False
+            _cal["cal_quat"]      = None
+            s.reset()
+            finger_limiter.reset()
+            for f in joint_filters:
+                f.reset()
+            _last_cb_t[0] = 0.0
+            print("[teleop] Reset complete.")
+            return
+
         lm, wrist_cam = buf.read()
 
         if lm is None:
@@ -326,10 +348,13 @@ def main() -> None:
 
         now = time.perf_counter()
 
-        # 1. Finger joint angles (retarget + smooth)
+        # 1. Finger joint angles (retarget + smooth + velocity clamp)
+        dt_cb = now - _last_cb_t[0] if _last_cb_t[0] > 0.0 else 1.0 / args.physics_hz
+        _last_cb_t[0] = now
         raw_q = retargeter.retarget(lm)
         for i in range(16):
             raw_q[i] = joint_filters[i].apply(raw_q[i], now)
+        raw_q = finger_limiter.apply(raw_q, dt_cb)
         _last_q[0] = raw_q
         s.set_finger_targets(raw_q)
 
@@ -376,6 +401,7 @@ def main() -> None:
         f"  Stereo depth: {'on' if STEREO_DEPTH else 'off — fixed wrist pos'}\n"
         f"  Preview     : {'off' if args.no_preview else 'subprocess (_camera_viewer.py)'}\n"
         "\n  Press A in the MuJoCo viewer to calibrate wrist orientation.\n"
+        "  Press R in the MuJoCo viewer to reset hand to start pose.\n"
     )
 
     try:
