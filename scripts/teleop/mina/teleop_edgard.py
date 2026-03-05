@@ -34,6 +34,7 @@ from vision.detectors                    import StereoHandTracker
 import vision.geometry                   as geo
 from vision.smoother                     import OneEuroFilter
 from robots.leap_hand.ik_retargeting     import IKRetargeter, palm_quat
+from robots.leap_hand.arm_ik             import ArmIKSolver
 
 # ── Tunable constants ─────────────────────────────────────────────────────────
 CAMERA_ID    = 0       # 0 = webcam / seule caméra détectée. Mettre 1 quand la ZED est branchée.
@@ -131,21 +132,27 @@ _SCENE_XML = os.path.join(_DIR, "robots", "leap_hand", "scene.xml")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def _init_hand(model: mujoco.MjModel, data: mujoco.MjData):
+def _init_hand(model: mujoco.MjModel, data: mujoco.MjData,
+               arm_ik: 'ArmIKSolver | None' = None) -> np.ndarray:
     """
-    Teleport the LEAP palm to the starting position before physics runs.
+    Teleport the LEAP palm and optionally set the arm initial pose.
 
-    Without this, the palm starts at its XML-defined origin and falls under
-    gravity before the weld constraint can engage on the first frame.
+    Returns the offset (hand_proxy_pos − arm_ee_pos) at init time so the
+    arm can follow the hand without being glued to it.
     """
+    # Set right arm to a bent rest pose so the IK solver has good coverage
+    if arm_ik is not None:
+        sp_jid = model.joint("arm_right_shoulder_pitch_joint").id
+        ep_jid = model.joint("arm_right_elbow_pitch_joint").id
+        data.qpos[model.jnt_qposadr[sp_jid]] = np.pi / 2
+        data.qpos[model.jnt_qposadr[ep_jid]] = -np.pi / 4
+
     mid  = model.body("hand_proxy").mocapid[0]
     pos  = np.array([0.0, START_Y, START_Z])
 
     data.mocap_pos[mid]  = pos
     data.mocap_quat[mid] = BASE_QUAT.copy()
 
-    # Palm freejoint: initialize at the weld target pose (BASE_QUAT * relpose)
-    # relpose = Rx(-90°) → palm at Rx(180°) * Rx(-90°) = Rx(+90°): fingers +Z, palm -Y
     RELPOSE_QUAT = np.array([0.5, -0.5, 0.5, 0.5])
     palm_quat_init = _quat_mul(BASE_QUAT, RELPOSE_QUAT)
 
@@ -154,19 +161,31 @@ def _init_hand(model: mujoco.MjModel, data: mujoco.MjData):
     data.qpos[addr:addr+3] = pos
     data.qpos[addr+3:addr+7] = palm_quat_init
 
+    # Lock arm actuators at their current qpos so the robot stays still
+    if arm_ik is not None:
+        for i, act_idx in enumerate(arm_ik.act_indices):
+            data.ctrl[act_idx] = data.qpos[arm_ik.qpos_adr[i]]
+
     mujoco.mj_forward(model, data)
 
+    # Return the spatial offset between hand_proxy and arm EE
+    if arm_ik is not None:
+        return pos - data.xpos[arm_ik.ee_body_id].copy()
+    return np.zeros(3)
 
-def _update(data:     mujoco.MjData,
-            zed:      ZEDCamera,
-            tracker:  StereoHandTracker,
-            ik:       IKRetargeter,
-            pos_f:    OneEuroFilter,
-            joint_f:  OneEuroFilter,
-            orient_f: OneEuroFilter,
-            pitch_f:  OneEuroFilter,
-            yaw_f:    OneEuroFilter,
-            mid:      int) -> None:
+
+def _update(data:       mujoco.MjData,
+            zed:        ZEDCamera,
+            tracker:    StereoHandTracker,
+            ik:         IKRetargeter,
+            pos_f:      OneEuroFilter,
+            joint_f:    OneEuroFilter,
+            orient_f:   OneEuroFilter,
+            pitch_f:    OneEuroFilter,
+            yaw_f:      OneEuroFilter,
+            mid:        int,
+            arm_ik:     'ArmIKSolver | None' = None,
+            arm_offset: np.ndarray = np.zeros(3)) -> None:
     """
     Single-frame update: capture → detect → retarget → actuate.
 
@@ -191,7 +210,7 @@ def _update(data:     mujoco.MjData,
         joint_f.reset()
         data.ctrl[:] = 0.0
         data.qvel[:] = 0.0
-        _init_hand(model, data)
+        _init_hand(data.model, data, arm_ik)
         print("[RESET] Hand position, fingers & calibration reset (R key)")
 
     h, w, _ = frame_l.shape
@@ -372,6 +391,11 @@ def _update(data:     mujoco.MjData,
         q = q / np.linalg.norm(q)
         data.mocap_quat[mid] = q
 
+        # ── Arm IK: right arm tracks hand_proxy with initial offset ──
+        if arm_ik is not None:
+            arm_target_pos = data.mocap_pos[mid] - arm_offset
+            arm_ik.solve(data.model, data, arm_target_pos, q)
+
         # ── Direct angle retargeting (only after calibration) ────────
         q_raw    = ik.retarget(None, lm_l)
         q_smooth = joint_f(q_raw)
@@ -506,16 +530,17 @@ def main():
     # Mocap body index for hand_proxy
     mid = model.body("hand_proxy").mocapid[0]
 
-    # Retargeter and filters
+    # Retargeter, arm IK and filters
     ik       = IKRetargeter(model)
+    arm_ik   = ArmIKSolver(model)
     pos_f    = OneEuroFilter(POS_FREQ,    min_cutoff=POS_MC,    beta=POS_BETA)
     joint_f  = OneEuroFilter(JOINT_FREQ,  min_cutoff=JOINT_MC,  beta=JOINT_BETA)
     orient_f = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
     pitch_f  = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
     yaw_f    = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
 
-    # Spawn hand at rest position
-    _init_hand(model, data)
+    # Spawn hand + arm at rest position; get the spatial offset between them
+    arm_offset = _init_hand(model, data, arm_ik)
 
     # Camera viewer in a separate lightweight process (only imports cv2,
     # NOT mujoco — avoids the Cocoa / OpenGL conflict with mjpython on macOS).
@@ -538,10 +563,12 @@ def main():
 
     with mujoco.viewer.launch_passive(model, data, key_callback=_key_callback) as v:
         while v.is_running():
-            _update(data, zed, tracker, ik, pos_f, joint_f, orient_f, pitch_f, yaw_f, mid)
+            _update(data, zed, tracker, ik, pos_f, joint_f, orient_f, pitch_f, yaw_f,
+                    mid, arm_ik, arm_offset)
 
             for _ in range(N_SUBSTEPS):
                 mujoco.mj_step(model, data)
+            arm_ik.clamp_after_step(data)
             v.sync()
 
     # Clean shutdown
