@@ -73,5 +73,42 @@ def main() -> None:
     cv2.destroyAllWindows()
 
 
+def viewer_loop(frame_q, reset_flag=None) -> None:
+    """Legacy entry point used by teleop_edgard.py (multiprocessing.Queue protocol).
+
+    Parameters
+    ----------
+    frame_q : multiprocessing.Queue
+        Receives BGR numpy frames. ``None`` sentinel signals shutdown.
+    reset_flag : multiprocessing.Value, optional
+        Shared int flag — set to 1 when the user presses 'r' in the viewer.
+    """
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WINDOW_NAME, 1280, 360)
+
+    while True:
+        try:
+            frame = frame_q.get(timeout=0.1)
+        except Exception:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+            if key == ord("r") and reset_flag is not None:
+                reset_flag.value = 1
+            continue
+
+        if frame is None:
+            break
+
+        cv2.imshow(WINDOW_NAME, frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+        if key == ord("r") and reset_flag is not None:
+            reset_flag.value = 1
+
+    cv2.destroyAllWindows()
+
+
 if __name__ == "__main__":
     main()
