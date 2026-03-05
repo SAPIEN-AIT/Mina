@@ -141,13 +141,6 @@
                   <geom type="mesh" class="hum_visual" pos="0 0 0.005"
                         quat="0 0 0.991445 -0.130526" mesh="hum_arm_right_elbow_roll_visual"
                         material="hum_arm_right_elbow_roll_visual_material"/>
-                  <body name="arm_right_hand_link" pos="0 0 0" quat="0 -0.707107 0.707107 0">
-                    <inertial pos="-0.00248666 0.0134979 -0.0541316" mass="0.291741"
-                              fullinertia="0.000556491 0.000494025 0.000161723 3.82363e-06 -2.67254e-06 -0.000102102"/>
-                    <geom type="mesh" class="hum_visual" pos="-0.00248666 0.0134979 -0.0541316"
-                          quat="0.701057 0.092296 0.092296 0.701057" mesh="hum_arm_right_hand_link_visual"
-                          material="hum_arm_right_hand_link_visual_material"/>
-                  </body>
                 </body>
               </body>
             </body>

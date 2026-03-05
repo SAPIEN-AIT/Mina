@@ -196,6 +196,7 @@ def _update(data:       mujoco.MjData,
     """
     global _wrist_ref_angle, _wrist_calib_count, _pitch_ref_angle, _pitch_calib_count, _yaw_ref_angle, _yaw_calib_count, _last_hand_time, _calibrate_flag
     import time as _time
+    ik_info = None
     frame_l, frame_r = zed.get_frames()
     if frame_l is None:
         return
@@ -392,9 +393,10 @@ def _update(data:       mujoco.MjData,
         data.mocap_quat[mid] = q
 
         # ── Arm IK: right arm tracks hand_proxy with initial offset ──
+        ik_info = None
         if arm_ik is not None:
             arm_target_pos = data.mocap_pos[mid] - arm_offset
-            arm_ik.solve(data.model, data, arm_target_pos, q)
+            ik_info = arm_ik.solve(data.model, data, arm_target_pos, q)
 
         # ── Direct angle retargeting (only after calibration) ────────
         q_raw    = ik.retarget(None, lm_l)
@@ -465,6 +467,23 @@ def _update(data:       mujoco.MjData,
             r_col = (0, 220, 0) if res_r.multi_hand_landmarks else (0, 0, 255)
             cv2.putText(frame_r, r_det, (20, 35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, r_col, 2)
+
+            # ── ARM IK HUD (bottom-right of right frame, large text) ──
+            if ik_info is not None:
+                d = ik_info["deg"]
+                err = ik_info["err_mm"]
+                err_col = (0, 220, 0) if err < 30 else (0, 165, 255) if err < 80 else (0, 0, 255)
+                _ik_lines = [
+                    (f"ARM IK  err={err:.0f}mm", err_col),
+                    (f"sh_p={d[0]:+5.0f}  sh_r={d[1]:+5.0f}  sh_y={d[2]:+5.0f}", (200, 200, 200)),
+                    (f"el_p={d[3]:+5.0f}  el_r={d[4]:+5.0f}", (200, 200, 200)),
+                ]
+                for li, (txt, col) in enumerate(_ik_lines):
+                    y_pos = h - 30 - (len(_ik_lines) - 1 - li) * 40
+                    sz = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+                    cv2.putText(frame_r, txt, (w - sz[0] - 15, y_pos),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, 2)
+
             display = np.hstack([frame_l, frame_r])
         else:
             display = frame_l

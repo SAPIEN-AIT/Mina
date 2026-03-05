@@ -88,8 +88,12 @@ class ArmIKSolver:
         self.jacr = np.zeros((3, model.nv))
 
     def solve(self, model: mujoco.MjModel, data: mujoco.MjData,
-              target_pos: np.ndarray, target_quat: np.ndarray) -> None:
-        """Run IK on a scratch copy and kinematically drive the arm."""
+              target_pos: np.ndarray, target_quat: np.ndarray) -> dict:
+        """Run IK on a scratch copy and kinematically drive the arm.
+
+        Returns a dict with 'deg' (joint angles in degrees) and 'err_mm'
+        (position error in millimetres) for HUD display.
+        """
 
         cur_arm_q = data.qpos[self.qpos_adr].copy()
 
@@ -141,13 +145,10 @@ class ArmIKSolver:
         for i, act_idx in enumerate(self.act_indices):
             data.ctrl[act_idx] = new_q[i]
 
-        # --- Debug print ---
         ee_pos = data.xpos[self.ee_body_id]
-        pos_err = np.linalg.norm(target_pos - ee_pos)
+        err_mm = np.linalg.norm(target_pos - ee_pos) * 1000
         deg = np.degrees(new_q)
-        print(f"[ARM IK] sh_p={deg[0]:+6.1f}° sh_r={deg[1]:+6.1f}° "
-              f"sh_y={deg[2]:+6.1f}° elb_p={deg[3]:+6.1f}° elb_r={deg[4]:+6.1f}°  "
-              f"err={pos_err*1000:.0f}mm")
+        return {"deg": deg, "err_mm": err_mm}
 
     def clamp_after_step(self, data: mujoco.MjData) -> None:
         """Enforce joint limits after mj_step (physics can violate them)."""
