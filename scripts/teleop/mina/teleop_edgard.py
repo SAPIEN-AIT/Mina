@@ -30,7 +30,7 @@ import mujoco.viewer
 import cv2
 
 from vision.camera                       import ZEDCamera
-from vision.detectors                    import StereoHandTracker
+from vision.detectors                    import StereoHandTracker, ArmTracker
 import vision.geometry                   as geo
 from vision.smoother                     import OneEuroFilter
 from robots.leap_hand.ik_retargeting     import IKRetargeter, palm_quat
@@ -88,6 +88,11 @@ RY_POS_BOOST   = 1.2    # reduced yaw sensitivity (positive side)
 RY_NEG_BOOST   = 2.0    # reduced yaw sensitivity (negative side)
 RZ_RY_DECOUPLE = 0.6    # subtract this × Ry from Rz to cancel cross-talk
 
+# Morphological calibration (human -> robot scale)
+MORPH_SCALE_MIN = 0.60
+MORPH_SCALE_MAX = 1.50
+MORPH_PRINT_EVERY_SEC = 1.0  # terminal log period for live morphology
+
 # One Euro Filters for wrist angles (1-dim each)
 WRIST_FREQ     = 30.0
 WRIST_MC       = 0.3
@@ -108,6 +113,7 @@ OTHER_HAND    = "Right"  # your physical left hand on a non-mirrored ZED
 # cv2.imshow conflicts with mjpython's Cocoa event loop on macOS.
 # Set to True only when running with plain `python` (not `mjpython`).
 SHOW_CAMERA  = True
+PRINT_RIGHT_ARM_DEBUG = True
 
 # ── Quaternion helpers ────────────────────────────────────────────────────────
 def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -137,6 +143,42 @@ def _find_hand_by_label(result, label: str):
         if cls.label == label:
             return result.multi_hand_landmarks[i], cls.score
     return None, 0.0
+
+
+def _dist3(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.linalg.norm(a - b))
+
+
+def _pose_morphology(pose_result):
+    """Extract arm lengths + shoulder width from MediaPipe pose world landmarks."""
+    if pose_result is None or pose_result.pose_world_landmarks is None:
+        return None
+
+    lm = pose_result.pose_world_landmarks.landmark
+
+    def p(i: int) -> np.ndarray:
+        return np.array([lm[i].x, lm[i].y, lm[i].z], dtype=float)
+
+    # MediaPipe Pose indices: L(11,13,15), R(12,14,16)
+    l_sh, l_el, l_wr = p(11), p(13), p(15)
+    r_sh, r_el, r_wr = p(12), p(14), p(16)
+
+    l_upper = _dist3(l_sh, l_el)
+    l_fore = _dist3(l_el, l_wr)
+    r_upper = _dist3(r_sh, r_el)
+    r_fore = _dist3(r_el, r_wr)
+    shoulder_w = _dist3(l_sh, r_sh)
+
+    # Reject obviously bad frames.
+    vals = np.array([l_upper, l_fore, r_upper, r_fore, shoulder_w], dtype=float)
+    if np.any(vals < 0.05) or np.any(vals > 0.80):
+        return None
+
+    return {
+        "left_reach_h": l_upper + l_fore,
+        "right_reach_h": r_upper + r_fore,
+        "shoulder_w_h": shoulder_w,
+    }
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -197,6 +239,7 @@ def _init_hand(model: mujoco.MjModel, data: mujoco.MjData,
 def _update(data:       mujoco.MjData,
             zed:        ZEDCamera,
             tracker:    StereoHandTracker,
+            pose_tracker: 'ArmTracker | None',
             ik:         IKRetargeter,
             pos_f:      OneEuroFilter,
             joint_f:    OneEuroFilter,
@@ -215,12 +258,27 @@ def _update(data:       mujoco.MjData,
     Left physical hand  → left arm IK (position only).
     """
     global _wrist_ref_angle, _wrist_calib_count, _pitch_ref_angle, _pitch_calib_count, _yaw_ref_angle, _yaw_calib_count, _last_hand_time, _calibrate_flag, _left_calib_flag, _left_ref_pos, _left_ee_start, _last_left_target, _left_mono_ref_span
+    global _right_ref_pos, _right_ee_start, _arm_scale_left, _arm_scale_right
+    global _robot_reach_left, _robot_reach_right, _robot_shoulder_w
+    global _last_morph_print_time
     import time as _time
     ik_info = None
     left_ik_info = None
     frame_l, frame_r = zed.get_frames()
     if frame_l is None:
         return
+
+    # Continuous console debug for right arm IK state.
+    if PRINT_RIGHT_ARM_DEBUG and arm_ik is not None:
+        r_ee = data.xpos[arm_ik.ee_body_id]
+        rq = data.qpos[arm_ik.qpos_adr]
+        rdeg = np.degrees(rq)
+        print(
+            "[R_ARM] "
+            f"ee=({r_ee[0]:+.3f}, {r_ee[1]:+.3f}, {r_ee[2]:+.3f})  "
+            f"sh_pitch={rdeg[0]:+6.1f}  sh_roll={rdeg[1]:+6.1f}  sh_yaw={rdeg[2]:+6.1f}  "
+            f"el_pitch={rdeg[3]:+6.1f}  el_roll={rdeg[4]:+6.1f}"
+        )
 
     # ── Reset (touche R) ──────────────────────────────────────────────────
     if _reset_flag is not None and _reset_flag.value:
@@ -235,6 +293,8 @@ def _update(data:       mujoco.MjData,
         _left_ref_pos = None
         _last_left_target = None
         _left_mono_ref_span = None
+        _right_ref_pos = None
+        _right_ee_start = None
         if left_pos_f is not None:
             left_pos_f.reset()
         _init_hand(data.model, data, arm_ik, left_arm_ik)
@@ -242,6 +302,17 @@ def _update(data:       mujoco.MjData,
 
     h, w, _ = frame_l.shape
     res_l, res_r = tracker.process(frame_l, frame_r)
+    pose_res = pose_tracker.process(frame_l) if pose_tracker is not None else None
+    morph_live = _pose_morphology(pose_res)
+    now = _time.monotonic()
+    if morph_live is not None and now - _last_morph_print_time >= MORPH_PRINT_EVERY_SEC:
+        print(
+            f"[MORPH LIVE] human L={morph_live['left_reach_h']:.3f}m "
+            f"R={morph_live['right_reach_h']:.3f}m "
+            f"shoulders={morph_live['shoulder_w_h']:.3f}m "
+            f"| scale L={_arm_scale_left:.2f} R={_arm_scale_right:.2f}"
+        )
+        _last_morph_print_time = now
 
     # ── Find each hand by handedness label ──────────────────────────────
     lm_target, target_score = _find_hand_by_label(res_l, TARGET_HAND)
@@ -365,6 +436,27 @@ def _update(data:       mujoco.MjData,
         joint_f.reset()
         _calibrate_flag = False
         _left_calib_flag = True
+        _right_ref_pos = np.array([sim_x, sim_y, sim_z], dtype=float)
+        mujoco.mj_forward(data.model, data)
+        _right_ee_start = data.xpos[arm_ik.ee_body_id].copy() if arm_ik is not None else None
+
+        morph = _pose_morphology(pose_res)
+        if (morph is not None and
+                _robot_reach_left is not None and _robot_reach_right is not None):
+            left_scale = _robot_reach_left / max(morph["left_reach_h"], 1e-6)
+            right_scale = _robot_reach_right / max(morph["right_reach_h"], 1e-6)
+            _arm_scale_left = float(np.clip(left_scale, MORPH_SCALE_MIN, MORPH_SCALE_MAX))
+            _arm_scale_right = float(np.clip(right_scale, MORPH_SCALE_MIN, MORPH_SCALE_MAX))
+            print(
+                f"[MORPH] scales L={_arm_scale_left:.2f} R={_arm_scale_right:.2f} "
+                f"(human shoulder={morph['shoulder_w_h']:.3f}m, "
+                f"robot shoulder={_robot_shoulder_w:.3f}m)"
+            )
+        else:
+            _arm_scale_left = 1.0
+            _arm_scale_right = 1.0
+            print("[MORPH] Pose indisponible: scale=1.0")
+
         print("[CALIB] Orientation de référence capturée (auto)." if auto_trigger else "[CALIB] Orientation de référence capturée.")
 
     # ── Before calibration: hand frozen at start pose ─────────────────
@@ -443,7 +535,11 @@ def _update(data:       mujoco.MjData,
         # ── Arm IK: right arm tracks hand_proxy with initial offset ──
         ik_info = None
         if arm_ik is not None:
-            arm_target_pos = data.mocap_pos[mid] - arm_offset
+            if _right_ref_pos is not None and _right_ee_start is not None:
+                right_delta = data.mocap_pos[mid] - _right_ref_pos
+                arm_target_pos = _right_ee_start + right_delta * _arm_scale_right
+            else:
+                arm_target_pos = data.mocap_pos[mid] - arm_offset
             ik_info = arm_ik.solve(data.model, data, arm_target_pos, q)
 
         # ── Direct angle retargeting (only after calibration) ────────
@@ -510,7 +606,7 @@ def _update(data:       mujoco.MjData,
 
         if _left_ref_pos is not None:
             delta_lh = raw_lh_pos - _left_ref_pos
-            target_lh = _left_ee_start + delta_lh
+            target_lh = _left_ee_start + delta_lh * _arm_scale_left
             if left_pos_f is not None:
                 target_lh = left_pos_f(target_lh)
             if _last_left_target is not None:
@@ -524,6 +620,14 @@ def _update(data:       mujoco.MjData,
 
     if SHOW_CAMERA:
         tracker.draw_landmarks(frame_l, res_l)
+        if pose_tracker is not None and pose_res is not None:
+            pose_tracker.draw_landmarks(frame_l, pose_res)
+
+        # Morph scale HUD
+        morph_txt = f"MORPH L={_arm_scale_left:.2f} R={_arm_scale_right:.2f}"
+        morph_col = (220, 180, 0) if _arm_scale_left != 1.0 else (100, 100, 100)
+        cv2.putText(frame_l, morph_txt, (20, 148),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, morph_col, 2)
 
         # Top-left: mode + hand detection status
         cv2.putText(frame_l, hud_mode, (20, 35),
@@ -647,6 +751,16 @@ _left_ref_pos = None
 _left_ee_start = None
 _last_left_target = None
 _left_mono_ref_span = None   # palm length in pixels at calibration (for mono depth)
+_right_ref_pos = None
+_right_ee_start = None
+
+# Morphological calibration state (human -> robot scaling)
+_arm_scale_left = 1.0
+_arm_scale_right = 1.0
+_robot_reach_left = None
+_robot_reach_right = None
+_robot_shoulder_w = None
+_last_morph_print_time = 0.0
 
 # Auto-calibration timer (seconds after viewer opens)
 AUTO_CALIB_SEC = 5.0
@@ -685,13 +799,14 @@ def _key_callback(keycode):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
-    global _frame_q, _start_time
+    global _frame_q, _start_time, _robot_reach_left, _robot_reach_right, _robot_shoulder_w
 
     # Hardware
     # Pass y_offset so vertical alignment is ready when STEREO_DEPTH is re-enabled.
     zed     = ZEDCamera(camera_id=CAMERA_ID,
                         y_offset=geo.Y_OFFSET_PX if STEREO_DEPTH else 0)
     tracker = StereoHandTracker()
+    pose_tracker = ArmTracker()
 
     # Physics
     model = mujoco.MjModel.from_xml_path(_SCENE_XML)
@@ -713,6 +828,16 @@ def main():
 
     # Spawn hand + arms at rest position
     arm_offset = _init_hand(model, data, arm_ik, left_arm_ik)
+
+    # Robot morphology references at neutral pose (for human->robot scaling)
+    mujoco.mj_forward(model, data)
+    r_sh = data.xpos[model.body("arm_right_shoulder_pitch").id].copy()
+    l_sh = data.xpos[model.body("arm_left_shoulder_pitch").id].copy()
+    r_ee = data.xpos[arm_ik.ee_body_id].copy()
+    l_ee = data.xpos[left_arm_ik.ee_body_id].copy()
+    _robot_reach_right = float(np.linalg.norm(r_ee - r_sh))
+    _robot_reach_left = float(np.linalg.norm(l_ee - l_sh))
+    _robot_shoulder_w = float(np.linalg.norm(r_sh - l_sh))
 
     # Enable clamping from the very first frame (prevents gravity drift
     # during the pre-calibration period)
@@ -743,7 +868,7 @@ def main():
 
     with mujoco.viewer.launch_passive(model, data, key_callback=_key_callback) as v:
         while v.is_running():
-            _update(data, zed, tracker, ik, pos_f, joint_f, orient_f, pitch_f, yaw_f,
+            _update(data, zed, tracker, pose_tracker, ik, pos_f, joint_f, orient_f, pitch_f, yaw_f,
                     mid, arm_ik, arm_offset, left_arm_ik, left_pos_f)
 
             for _ in range(N_SUBSTEPS):
@@ -758,6 +883,7 @@ def main():
         viewer_proc.join(timeout=3)
 
     zed.close()
+    pose_tracker.close()
     cv2.destroyAllWindows()
 
 

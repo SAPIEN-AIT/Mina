@@ -1,8 +1,9 @@
 """
-arm_ik.py — Generic IK for the humanoid arms (left or right).
+arm_ik.py — Hybrid delta IK for the humanoid arms (left or right).
 
-Iterative damped least-squares on a *separate* MjData copy, then
-directly sets qpos (kinematic control) with per-frame rate limiting.
+Single-pass damped least-squares: computes Δq from the real EE error each
+frame (no iterative loop, no scratch MjData copy).  Because the error is
+measured against the *actual* EE position, drift is self-correcting.
 """
 
 import numpy as np
@@ -42,53 +43,31 @@ _LEFT_ACTS = [
 _LEFT_EE = "arm_left_elbow_roll"
 
 
-def _quat_error(target_quat, current_quat):
-    """Orientation error as a 3-D rotation vector (axis * angle)."""
-    tw, tx, ty, tz = target_quat
-    cw, cx, cy, cz = current_quat
-
-    ew =  tw * cw + tx * cx + ty * cy + tz * cz
-    ex = -tw * cx + tx * cw - ty * cz + tz * cy
-    ey = -tw * cy + tx * cz + ty * cw - tz * cx
-    ez = -tw * cz - tx * cy + ty * cx + tz * cw
-
-    if ew < 0:
-        ew, ex, ey, ez = -ew, -ex, -ey, -ez
-
-    sin_half = np.sqrt(ex * ex + ey * ey + ez * ez)
-    if sin_half < 1e-8:
-        return np.zeros(3)
-
-    angle = 2.0 * np.arctan2(sin_half, ew)
-    axis = np.array([ex, ey, ez]) / sin_half
-    return axis * angle
-
-
 class ArmIKSolver:
-    """Iterative DLS IK with direct kinematic qpos control.
+    """Hybrid delta IK with direct kinematic qpos control.
+
+    Each call to ``solve()`` performs a single-pass DLS resolution on
+    the *real* simulation data (no scratch copy).  The error vector is
+    ``target_pos − current_ee_pos``, which naturally corrects drift.
 
     Parameters
     ----------
     model : MjModel
     side : str
         ``"right"`` or ``"left"``.
+    damping : float
+        DLS regularisation (λ).
+    ik_step : float
+        Gain applied to Δq (0 < gain ≤ 1).  Higher = more reactive.
     """
 
     def __init__(self, model: mujoco.MjModel,
                  side: str = "right",
                  damping: float = 1e-2,
-                 max_iter: int = 50,
-                 tol: float = 1e-3,
-                 ik_step: float = 0.5,
-                 max_delta_per_frame: float = 0.12,
-                 orient_weight: float = 0.0):
+                 ik_step: float = 0.8):
         self.side = side
         self.damping = damping
-        self.max_iter = max_iter
-        self.tol = tol
         self.ik_step = ik_step
-        self.max_delta = max_delta_per_frame
-        self.orient_weight = orient_weight
 
         if side == "right":
             jnt_names, act_names, ee_body = _RIGHT_JOINTS, _RIGHT_ACTS, _RIGHT_EE
@@ -114,64 +93,34 @@ class ArmIKSolver:
             [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
              for n in act_names], dtype=int)
 
-        self._ik_data = mujoco.MjData(model)
         self.jacp = np.zeros((3, model.nv))
-        self.jacr = np.zeros((3, model.nv))
         self._last_q = None
 
     def solve(self, model: mujoco.MjModel, data: mujoco.MjData,
               target_pos: np.ndarray, target_quat: np.ndarray) -> dict:
-        """Run IK on a scratch copy and kinematically drive the arm.
+        """Single-pass hybrid delta IK.
 
-        Returns a dict with 'deg' (joint angles in degrees) and 'err_mm'
-        (position error in millimetres) for HUD display.
+        1. ``mj_forward`` on real data to get current EE pose + Jacobian
+        2. Δx = target − ee_pos  (self-correcting: always chases the real EE)
+        3. Δq = (Jp^T Jp + λI)^{-1} Jp^T Δx
+        4. q_new = q + gain * Δq, clamped to joint limits
+
+        Returns a dict with 'deg' and 'err_mm' for HUD display.
         """
+        mujoco.mj_forward(model, data)
 
-        cur_arm_q = data.qpos[self.qpos_adr].copy()
+        ee_pos = data.xpos[self.ee_body_id]
+        pos_err = target_pos - ee_pos
 
-        d = self._ik_data
-        d.qpos[:] = data.qpos
+        mujoco.mj_jacBody(model, data, self.jacp, None, self.ee_body_id)
+        Jp = self.jacp[:, self.dof_adr]
 
-        for _ in range(self.max_iter):
-            mujoco.mj_forward(model, d)
+        JtJ = Jp.T @ Jp + self.damping * np.eye(self.n_arm)
+        dq = np.linalg.solve(JtJ, Jp.T @ pos_err)
 
-            ee_pos = d.xpos[self.ee_body_id]
-
-            pos_err = target_pos - ee_pos
-
-            mujoco.mj_jacBody(model, d, self.jacp, self.jacr,
-                              self.ee_body_id)
-
-            Jp = self.jacp[:, self.dof_adr]
-
-            if self.orient_weight > 1e-6:
-                ee_quat = d.xquat[self.ee_body_id]
-                rot_err = _quat_error(target_quat, ee_quat) * self.orient_weight
-                Jr = self.jacr[:, self.dof_adr]
-                J = np.vstack([Jp, Jr])
-                err = np.concatenate([pos_err, rot_err])
-            else:
-                J = Jp
-                err = pos_err
-
-            if np.linalg.norm(err) < self.tol:
-                break
-
-            JtJ = J.T @ J + self.damping * np.eye(self.n_arm)
-            dq = np.linalg.solve(JtJ, J.T @ err)
-
-            arm_q = d.qpos[self.qpos_adr] + self.ik_step * dq
-            arm_q = np.clip(arm_q, self.jnt_range[:, 0],
-                             self.jnt_range[:, 1])
-            d.qpos[self.qpos_adr] = arm_q
-
-        ik_target = d.qpos[self.qpos_adr].copy()
-
-        delta = ik_target - cur_arm_q
-        delta = np.clip(delta, -self.max_delta, self.max_delta)
-        new_q = cur_arm_q + delta
-        new_q = np.clip(new_q, self.jnt_range[:, 0],
-                         self.jnt_range[:, 1])
+        cur_q = data.qpos[self.qpos_adr]
+        new_q = cur_q + self.ik_step * dq
+        new_q = np.clip(new_q, self.jnt_range[:, 0], self.jnt_range[:, 1])
 
         data.qpos[self.qpos_adr] = new_q
         data.qvel[self.dof_adr] = 0.0
@@ -180,8 +129,7 @@ class ArmIKSolver:
 
         self._last_q = new_q.copy()
 
-        ee_pos = data.xpos[self.ee_body_id]
-        err_mm = np.linalg.norm(target_pos - ee_pos) * 1000
+        err_mm = np.linalg.norm(pos_err) * 1000
         deg = np.degrees(new_q)
         return {"deg": deg, "err_mm": err_mm}
 
