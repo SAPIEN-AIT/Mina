@@ -92,6 +92,8 @@ RZ_RY_DECOUPLE = 0.6    # subtract this × Ry from Rz to cancel cross-talk
 MORPH_SCALE_MIN = 0.60
 MORPH_SCALE_MAX = 1.50
 MORPH_PRINT_EVERY_SEC = 1.0  # terminal log period for live morphology
+ARM_RIGHT_GAIN = 1.60        # >1.0 = more sensitive right-arm motion
+ARM_LEFT_GAIN  = 1.60      # >1.0 = more sensitive left-arm motion
 
 # One Euro Filters for wrist angles (1-dim each)
 WRIST_FREQ     = 30.0
@@ -537,7 +539,7 @@ def _update(data:       mujoco.MjData,
         if arm_ik is not None:
             if _right_ref_pos is not None and _right_ee_start is not None:
                 right_delta = data.mocap_pos[mid] - _right_ref_pos
-                arm_target_pos = _right_ee_start + right_delta * _arm_scale_right
+                arm_target_pos = _right_ee_start + right_delta * _arm_scale_right * ARM_RIGHT_GAIN
             else:
                 arm_target_pos = data.mocap_pos[mid] - arm_offset
             ik_info = arm_ik.solve(data.model, data, arm_target_pos, q)
@@ -606,7 +608,7 @@ def _update(data:       mujoco.MjData,
 
         if _left_ref_pos is not None:
             delta_lh = raw_lh_pos - _left_ref_pos
-            target_lh = _left_ee_start + delta_lh * _arm_scale_left
+            target_lh = _left_ee_start + delta_lh * _arm_scale_left * ARM_LEFT_GAIN
             if left_pos_f is not None:
                 target_lh = left_pos_f(target_lh)
             if _last_left_target is not None:
