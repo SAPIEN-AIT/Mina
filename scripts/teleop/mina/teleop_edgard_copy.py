@@ -304,12 +304,12 @@ def _update(data:       mujoco.MjData,
         r_ee = data.xpos[arm_ik.ee_body_id]
         rq = data.qpos[arm_ik.qpos_adr]
         rdeg = np.degrees(rq)
-        print(
-            "[R_ARM] "
-            f"ee=({r_ee[0]:+.3f}, {r_ee[1]:+.3f}, {r_ee[2]:+.3f})  "
-            f"sh_pitch={rdeg[0]:+6.1f}  sh_roll={rdeg[1]:+6.1f}  sh_yaw={rdeg[2]:+6.1f}  "
-            f"el_pitch={rdeg[3]:+6.1f}  el_roll={rdeg[4]:+6.1f}"
-        )
+        #print(
+        #    "[R_ARM] "
+        #    f"ee=({r_ee[0]:+.3f}, {r_ee[1]:+.3f}, {r_ee[2]:+.3f})  "
+        #    f"sh_pitch={rdeg[0]:+6.1f}  sh_roll={rdeg[1]:+6.1f}  sh_yaw={rdeg[2]:+6.1f}  "
+        #    f"el_pitch={rdeg[3]:+6.1f}  el_roll={rdeg[4]:+6.1f}"
+        #)
 
     # ── Reset (touche R) ──────────────────────────────────────────────────
     if _reset_flag is not None and _reset_flag.value:
@@ -331,20 +331,26 @@ def _update(data:       mujoco.MjData,
         if left_pos_f is not None:
             left_pos_f.reset()
         _init_hand(data.model, data, arm_ik, left_arm_ik)
-        print("[RESET] Hand position, fingers & calibration reset (R key)")
+        # print("[RESET] Hand position, fingers & calibration reset (R key)")
 
     h, w, _ = frame_l.shape
     res_l, res_r = tracker.process(frame_l, frame_r)
     pose_res = pose_tracker.process(frame_l) if pose_tracker is not None else None
     morph_live = _pose_morphology(pose_res)
     now = _time.monotonic()
-    if morph_live is not None and now - _last_morph_print_time >= MORPH_PRINT_EVERY_SEC:
-        print(
-            f"[MORPH LIVE] human L={morph_live['left_reach_h']:.3f}m "
-            f"R={morph_live['right_reach_h']:.3f}m "
-            f"shoulders={morph_live['shoulder_w_h']:.3f}m "
-            f"| scale L={_arm_scale_left:.2f} R={_arm_scale_right:.2f}"
-        )
+    if now - _last_morph_print_time >= MORPH_PRINT_EVERY_SEC:
+        if (pose_res is not None
+                and pose_res.pose_world_landmarks is not None):
+            wlm = pose_res.pose_world_landmarks.landmark
+            # Torso centre = average of shoulders (11,12) + hips (23,24)
+            tx = (wlm[11].x + wlm[12].x + wlm[23].x + wlm[24].x) / 4.0
+            ty = (wlm[11].y + wlm[12].y + wlm[23].y + wlm[24].y) / 4.0
+            tz = (wlm[11].z + wlm[12].z + wlm[23].z + wlm[24].z) / 4.0
+            print(
+                f"[TORSO] x={tx:+.3f}  y={ty:+.3f}  z={tz:+.3f}  (m, MediaPipe world frame)"
+            )
+        else:
+            print("[TORSO] pose non détectée")
         _last_morph_print_time = now
 
     # ── Find each hand by handedness label ──────────────────────────────
@@ -492,9 +498,9 @@ def _update(data:       mujoco.MjData,
         else:
             _arm_scale_left = 1.0
             _arm_scale_right = 1.0
-            print("[MORPH] Pose indisponible: scale=1.0")
+            #print("[MORPH] Pose indisponible: scale=1.0")
 
-        print("[CALIB] Orientation de référence capturée (auto)." if auto_trigger else "[CALIB] Orientation de référence capturée.")
+        # print("[CALIB] Orientation de référence capturée (auto)." if auto_trigger else "[CALIB] Orientation de référence capturée.")
 
     # ── Before calibration: hand frozen at start pose ─────────────────
     if _wrist_ref_angle is None:
@@ -584,7 +590,7 @@ def _update(data:       mujoco.MjData,
                 hand_rel = _mp_world_to_robot(rwr - rsh)
                 if _mp_right_hand_rel_ref is None:
                     _mp_right_hand_rel_ref = hand_rel.copy()
-                    print("[CALIB] Référence torse bras droit capturée.")
+                    # print("[CALIB] Référence torse bras droit capturée.")
                 delta_torso = (hand_rel - _mp_right_hand_rel_ref) * _arm_scale_right * ARM_RIGHT_GAIN
                 arm_target_pos = _right_ee_start + delta_torso
             elif _right_ref_pos is not None and _right_ee_start is not None:
@@ -624,7 +630,7 @@ def _update(data:       mujoco.MjData,
                 if left_pos_f is not None:
                     left_pos_f.reset()
                 _left_calib_flag = False
-                print("[CALIB] Référence torse bras gauche capturée.")
+                # print("[CALIB] Référence torse bras gauche capturée.")
 
             if _mp_left_hand_rel_ref is not None and _left_ee_start is not None:
                 delta_l = (hand_rel_l - _mp_left_hand_rel_ref) * _arm_scale_left * ARM_LEFT_GAIN
@@ -689,7 +695,7 @@ def _update(data:       mujoco.MjData,
                 if left_pos_f is not None:
                     left_pos_f.reset()
                 _left_calib_flag = False
-                print(f"[CALIB] Left arm reference captured (palm span={lh_span:.0f}px).")
+                # print(f"[CALIB] Left arm reference captured (palm span={lh_span:.0f}px).")
 
             if _left_ref_pos is not None:
                 delta_lh = raw_lh_pos - _left_ref_pos
@@ -885,7 +891,7 @@ def _key_callback(keycode):
     if keycode == 65:  # GLFW_KEY_A
         _calibrate_flag = True
         _left_calib_flag = True
-        print("[CALIB] Touche A détectée — calibration des deux mains au prochain frame.")
+        # print("[CALIB] Touche A détectée — calibration des deux mains au prochain frame.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -947,14 +953,14 @@ def main():
         viewer_proc = ctx.Process(target=viewer_loop, args=(_frame_q, _reset_flag), daemon=True)
         viewer_proc.start()
 
-    print("─" * 60)
-    print("  Binocular Hand Teleoperation — Humanoid Only (bras uniquement)")
-    print("  Main droite → bras droit IK")
-    print("  Main gauche → bras gauche IK")
-    print("  (Pas de main LEAP — retargeting doigts désactivé)")
-    print(f"  Auto-calibration dans {AUTO_CALIB_SEC:.0f}s (ou touche A)")
-    print("  ESC pour quitter.")
-    print("─" * 60)
+    # print("─" * 60)
+    # print("  Binocular Hand Teleoperation — Humanoid Only (bras uniquement)")
+    # print("  Main droite → bras droit IK")
+    # print("  Main gauche → bras gauche IK")
+    # print("  (Pas de main LEAP — retargeting doigts désactivé)")
+    # print(f"  Auto-calibration dans {AUTO_CALIB_SEC:.0f}s (ou touche A)")
+    # print("  ESC pour quitter.")
+    # print("─" * 60)
 
     import time as _time
     _start_time = _time.monotonic()
