@@ -92,8 +92,21 @@ RZ_RY_DECOUPLE = 0.6    # subtract this × Ry from Rz to cancel cross-talk
 MORPH_SCALE_MIN = 0.60
 MORPH_SCALE_MAX = 1.50
 MORPH_PRINT_EVERY_SEC = 1.0  # terminal log period for live morphology
-ARM_RIGHT_GAIN = 1.60        # >1.0 = more sensitive right-arm motion
-ARM_LEFT_GAIN  = 1.60      # >1.0 = more sensitive left-arm motion
+ARM_RIGHT_GAIN = 1.80        # >1.0 = more sensitive right-arm motion
+ARM_LEFT_GAIN  = 1.80        # >1.0 = more sensitive left-arm motion
+
+# ── Torso-relative arm control ─────────────────────────────────────────────────
+# True  = bras pilotés en repère torse (épaule→poignet, MediaPipe Pose world)
+# False = ancien comportement repère monde (pixel projection)
+USE_TORSO_RELATIVE = True
+
+# MediaPipe Pose world → robot sim axis mapping
+# MP world (origin=hips): x=cam-right (person-left), y=up, z=toward-cam
+# Robot sim:              x=lateral,                 z=up, y=forward
+# Signs à inverser si le mouvement part dans la mauvaise direction.
+_MP_SIGN_X = -1.0   # flip lateral (caméra non miroir)
+_MP_SIGN_Y =  -1.0   # mp.y (up) → robot.z (up) : même sens
+_MP_SIGN_Z = -1.0   # mp.z (toward-cam) → robot.y (forward) : sens opposé
 
 # One Euro Filters for wrist angles (1-dim each)
 WRIST_FREQ     = 30.0
@@ -133,6 +146,20 @@ def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def _quat_ensure_hemi(q: np.ndarray, ref: np.ndarray) -> np.ndarray:
     """Negate q if it is in the opposite hemisphere from ref (avoids filter flips)."""
     return -q if np.dot(q, ref) < 0 else q
+
+
+def _mp_world_to_robot(delta_mp: np.ndarray) -> np.ndarray:
+    """Convertit un vecteur delta MediaPipe Pose world → repère robot sim.
+
+    MP world : x=cam-right(person-left), y=up, z=toward-cam
+    Robot sim : x=lateral, y=forward(depth), z=up
+    Les signes sont ajustables via _MP_SIGN_X/Y/Z.
+    """
+    return np.array([
+        _MP_SIGN_X * delta_mp[0],   # latéral
+        _MP_SIGN_Z * delta_mp[2],   # profondeur → y robot
+        _MP_SIGN_Y * delta_mp[1],   # hauteur    → z robot
+    ])
 
 
 # ── Hand selection helper ──────────────────────────────────────────────────────
@@ -264,6 +291,7 @@ def _update(data:       mujoco.MjData,
     global _right_ref_pos, _right_ee_start, _arm_scale_left, _arm_scale_right
     global _robot_reach_left, _robot_reach_right, _robot_shoulder_w
     global _last_morph_print_time
+    global _mp_right_hand_rel_ref, _mp_left_hand_rel_ref
     import time as _time
     ik_info = None
     left_ik_info = None
@@ -298,6 +326,8 @@ def _update(data:       mujoco.MjData,
         _left_mono_ref_span = None
         _right_ref_pos = None
         _right_ee_start = None
+        _mp_right_hand_rel_ref = None
+        _mp_left_hand_rel_ref  = None
         if left_pos_f is not None:
             left_pos_f.reset()
         _init_hand(data.model, data, arm_ik, left_arm_ik)
@@ -443,6 +473,10 @@ def _update(data:       mujoco.MjData,
         mujoco.mj_forward(data.model, data)
         _right_ee_start = data.xpos[arm_ik.ee_body_id].copy() if arm_ik is not None else None
 
+        # Capture référence torso-relative (bras droit)
+        _mp_right_hand_rel_ref = None   # sera capturé au premier frame valide
+        _mp_left_hand_rel_ref  = None   # idem bras gauche
+
         morph = _pose_morphology(pose_res)
         if (morph is not None and
                 _robot_reach_left is not None and _robot_reach_right is not None):
@@ -535,10 +569,26 @@ def _update(data:       mujoco.MjData,
         q = q / np.linalg.norm(q)
         data.mocap_quat[mid] = q
 
-        # ── Arm IK: right arm tracks hand_proxy with initial offset ──
+        # ── Arm IK: right arm ────────────────────────────────────────────
         ik_info = None
         if arm_ik is not None:
-            if _right_ref_pos is not None and _right_ee_start is not None:
+            arm_target_pos = None
+            if (USE_TORSO_RELATIVE
+                    and pose_res is not None
+                    and pose_res.pose_world_landmarks is not None
+                    and _right_ee_start is not None):
+                # Repère torse : vecteur épaule droite → poignet droit (MP Pose world)
+                plm = pose_res.pose_world_landmarks.landmark
+                rsh = np.array([plm[12].x, plm[12].y, plm[12].z])
+                rwr = np.array([plm[16].x, plm[16].y, plm[16].z])
+                hand_rel = _mp_world_to_robot(rwr - rsh)
+                if _mp_right_hand_rel_ref is None:
+                    _mp_right_hand_rel_ref = hand_rel.copy()
+                    print("[CALIB] Référence torse bras droit capturée.")
+                delta_torso = (hand_rel - _mp_right_hand_rel_ref) * _arm_scale_right * ARM_RIGHT_GAIN
+                arm_target_pos = _right_ee_start + delta_torso
+            elif _right_ref_pos is not None and _right_ee_start is not None:
+                # Fallback : repère monde (pixel projection)
                 right_delta = data.mocap_pos[mid] - _right_ref_pos
                 arm_target_pos = _right_ee_start + right_delta * _arm_scale_right * ARM_RIGHT_GAIN
             else:
@@ -555,72 +605,105 @@ def _update(data:       mujoco.MjData,
                 q_smooth[i] = np.clip(q_smooth[i], lo, hi)
             data.ctrl[:n_leap] = q_smooth
 
-    # ── Left arm IK: physical left hand drives the left arm ──────────────
-    if left_arm_ik is not None and lm_other is not None:
-        lm_left = lm_other.landmark
-        cam = geo.ZED2I
+    # ── Left arm IK ──────────────────────────────────────────────────────
+    if left_arm_ik is not None:
+        # ── Torso-relative (USE_TORSO_RELATIVE=True) ────────────────────
+        if (USE_TORSO_RELATIVE
+                and pose_res is not None
+                and pose_res.pose_world_landmarks is not None):
+            plm = pose_res.pose_world_landmarks.landmark
+            lsh = np.array([plm[11].x, plm[11].y, plm[11].z])
+            lwr = np.array([plm[15].x, plm[15].y, plm[15].z])
+            hand_rel_l = _mp_world_to_robot(lwr - lsh)
 
-        _palm_ids = (0, 5, 9, 13, 17)
-        u_lh = sum(lm_left[i].x for i in _palm_ids) / len(_palm_ids) * w
-        v_lh = sum(lm_left[i].y for i in _palm_ids) / len(_palm_ids) * h
+            if _left_calib_flag:
+                _mp_left_hand_rel_ref = hand_rel_l.copy()
+                mujoco.mj_forward(data.model, data)
+                _left_ee_start = data.xpos[left_arm_ik.ee_body_id].copy()
+                _last_left_target = None
+                if left_pos_f is not None:
+                    left_pos_f.reset()
+                _left_calib_flag = False
+                print("[CALIB] Référence torse bras gauche capturée.")
 
-        lh_x = (u_lh - cam.cx) / cam.fx * START_Y * TRANS_SCALE
-        lh_z = START_Z + (-(v_lh - cam.cy) / cam.fy * START_Y) * TRANS_SCALE
-        lh_y = START_Y
+            if _mp_left_hand_rel_ref is not None and _left_ee_start is not None:
+                delta_l = (hand_rel_l - _mp_left_hand_rel_ref) * _arm_scale_left * ARM_LEFT_GAIN
+                target_lh = _left_ee_start + delta_l
+                if left_pos_f is not None:
+                    target_lh = left_pos_f(target_lh)
+                if _last_left_target is not None:
+                    delta_lt = target_lh - _last_left_target
+                    dist_lt = np.linalg.norm(delta_lt)
+                    if dist_lt > MOCAP_MAX_STEP:
+                        target_lh = _last_left_target + delta_lt * (MOCAP_MAX_STEP / dist_lt)
+                _last_left_target = target_lh.copy()
+                no_orient = np.array([1.0, 0.0, 0.0, 0.0])
+                left_ik_info = left_arm_ik.solve(data.model, data, target_lh, no_orient)
 
-        # Palm length in pixels (wrist→middle MCP) for mono depth estimation
-        lh_span = np.hypot(lm_left[9].x * w - lm_left[0].x * w,
-                           lm_left[9].y * h - lm_left[0].y * h)
+        # ── Fallback pixel-based (USE_TORSO_RELATIVE=False) ─────────────
+        elif lm_other is not None:
+            lm_left = lm_other.landmark
+            cam = geo.ZED2I
 
-        stereo_ok = False
-        if STEREO_DEPTH and lm_other_r is not None:
-            lm_lr = lm_other_r.landmark
-            py_l = int(lm_left[0].y * h)
-            py_r = int(lm_lr[0].y * h)
-            valid, _ = geo.check_epipolar_constraint(py_l, py_r, tolerance_px=EPIPOLAR_TOL)
-            if valid:
-                p3d = geo.stereo_hand_3d(lm_left, lm_lr, w, h,
-                                          depth_min_m=DEPTH_MIN_M,
-                                          depth_max_m=DEPTH_MAX_M)
-                if p3d is not None:
-                    x_m, y_m, z_m = p3d
-                    lh_x = -x_m * TRANS_SCALE
-                    lh_y = START_Y + (DEPTH_MID_M - z_m) * DEPTH_SCALE * TRANS_SCALE
-                    lh_z = START_Z + (-y_m) * TRANS_SCALE
-                    stereo_ok = True
+            _palm_ids = (0, 5, 9, 13, 17)
+            u_lh = sum(lm_left[i].x for i in _palm_ids) / len(_palm_ids) * w
+            v_lh = sum(lm_left[i].y for i in _palm_ids) / len(_palm_ids) * h
 
-        # Mono depth fallback: estimate depth from apparent hand size
-        if not stereo_ok and _left_mono_ref_span is not None and lh_span > 10:
-            mono_depth_m = DEPTH_MID_M * _left_mono_ref_span / lh_span
-            mono_depth_m = float(np.clip(mono_depth_m, DEPTH_MIN_M, DEPTH_MAX_M))
-            lh_y = START_Y + (DEPTH_MID_M - mono_depth_m) * DEPTH_SCALE * TRANS_SCALE
+            lh_x = (u_lh - cam.cx) / cam.fx * START_Y * TRANS_SCALE
+            lh_z = START_Z + (-(v_lh - cam.cy) / cam.fy * START_Y) * TRANS_SCALE
+            lh_y = START_Y
 
-        raw_lh_pos = np.array([lh_x, lh_y, lh_z])
+            lh_span = np.hypot(lm_left[9].x * w - lm_left[0].x * w,
+                               lm_left[9].y * h - lm_left[0].y * h)
 
-        if _left_calib_flag:
-            _left_ref_pos = raw_lh_pos.copy()
-            _left_mono_ref_span = lh_span if lh_span > 10 else None
-            mujoco.mj_forward(data.model, data)
-            _left_ee_start = data.xpos[left_arm_ik.ee_body_id].copy()
-            _last_left_target = None
-            if left_pos_f is not None:
-                left_pos_f.reset()
-            _left_calib_flag = False
-            print(f"[CALIB] Left arm reference captured (palm span={lh_span:.0f}px).")
+            stereo_ok = False
+            if STEREO_DEPTH and lm_other_r is not None:
+                lm_lr = lm_other_r.landmark
+                py_l = int(lm_left[0].y * h)
+                py_r = int(lm_lr[0].y * h)
+                valid, _ = geo.check_epipolar_constraint(py_l, py_r, tolerance_px=EPIPOLAR_TOL)
+                if valid:
+                    p3d = geo.stereo_hand_3d(lm_left, lm_lr, w, h,
+                                              depth_min_m=DEPTH_MIN_M,
+                                              depth_max_m=DEPTH_MAX_M)
+                    if p3d is not None:
+                        x_m, y_m, z_m = p3d
+                        lh_x = -x_m * TRANS_SCALE
+                        lh_y = START_Y + (DEPTH_MID_M - z_m) * DEPTH_SCALE * TRANS_SCALE
+                        lh_z = START_Z + (-y_m) * TRANS_SCALE
+                        stereo_ok = True
 
-        if _left_ref_pos is not None:
-            delta_lh = raw_lh_pos - _left_ref_pos
-            target_lh = _left_ee_start + delta_lh * _arm_scale_left * ARM_LEFT_GAIN
-            if left_pos_f is not None:
-                target_lh = left_pos_f(target_lh)
-            if _last_left_target is not None:
-                delta_lt = target_lh - _last_left_target
-                dist_lt = np.linalg.norm(delta_lt)
-                if dist_lt > MOCAP_MAX_STEP:
-                    target_lh = _last_left_target + delta_lt * (MOCAP_MAX_STEP / dist_lt)
-            _last_left_target = target_lh.copy()
-            no_orient = np.array([1.0, 0.0, 0.0, 0.0])
-            left_ik_info = left_arm_ik.solve(data.model, data, target_lh, no_orient)
+            if not stereo_ok and _left_mono_ref_span is not None and lh_span > 10:
+                mono_depth_m = DEPTH_MID_M * _left_mono_ref_span / lh_span
+                mono_depth_m = float(np.clip(mono_depth_m, DEPTH_MIN_M, DEPTH_MAX_M))
+                lh_y = START_Y + (DEPTH_MID_M - mono_depth_m) * DEPTH_SCALE * TRANS_SCALE
+
+            raw_lh_pos = np.array([lh_x, lh_y, lh_z])
+
+            if _left_calib_flag:
+                _left_ref_pos = raw_lh_pos.copy()
+                _left_mono_ref_span = lh_span if lh_span > 10 else None
+                mujoco.mj_forward(data.model, data)
+                _left_ee_start = data.xpos[left_arm_ik.ee_body_id].copy()
+                _last_left_target = None
+                if left_pos_f is not None:
+                    left_pos_f.reset()
+                _left_calib_flag = False
+                print(f"[CALIB] Left arm reference captured (palm span={lh_span:.0f}px).")
+
+            if _left_ref_pos is not None:
+                delta_lh = raw_lh_pos - _left_ref_pos
+                target_lh = _left_ee_start + delta_lh * _arm_scale_left * ARM_LEFT_GAIN
+                if left_pos_f is not None:
+                    target_lh = left_pos_f(target_lh)
+                if _last_left_target is not None:
+                    delta_lt = target_lh - _last_left_target
+                    dist_lt = np.linalg.norm(delta_lt)
+                    if dist_lt > MOCAP_MAX_STEP:
+                        target_lh = _last_left_target + delta_lt * (MOCAP_MAX_STEP / dist_lt)
+                _last_left_target = target_lh.copy()
+                no_orient = np.array([1.0, 0.0, 0.0, 0.0])
+                left_ik_info = left_arm_ik.solve(data.model, data, target_lh, no_orient)
 
     if SHOW_CAMERA:
         tracker.draw_landmarks(frame_l, res_l)
@@ -757,6 +840,10 @@ _last_left_target = None
 _left_mono_ref_span = None   # palm length in pixels at calibration (for mono depth)
 _right_ref_pos = None
 _right_ee_start = None
+
+# Torso-relative calibration references (pose world coords, shoulder→wrist)
+_mp_right_hand_rel_ref = None   # vecteur de référence épaule droite → poignet droit
+_mp_left_hand_rel_ref  = None   # vecteur de référence épaule gauche → poignet gauche
 
 # Morphological calibration state (human -> robot scaling)
 _arm_scale_left = 1.0

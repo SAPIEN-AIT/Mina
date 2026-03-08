@@ -60,8 +60,7 @@
                      range="-0.785398 0.785398"/>
               <inertial pos="-0.00781722 -9.17114e-05 0.0409759" mass="0.329199"
                         fullinertia="0.000196136 0.000241556 0.000214842 -1.164e-06 8.20811e-06 -4.93374e-07"/>
-              <geom class="hum_collision" pos="0 0 -0.035" quat="0 0 1 0" type="cylinder" size="0.04 0.075"
-                    contype="0" conaffinity="0"/>
+              <geom class="hum_collision" pos="0 0 -0.035" quat="0 0 1 0" type="cylinder" size="0.04 0.075"/>
               <geom type="mesh" class="hum_visual" pos="-0.00781722 -9.17114e-05 0.0409759"
                     quat="0.092296 0.701057 -0.701057 -0.092296" mesh="hum_arm_left_shoulder_yaw_visual"
                     material="hum_arm_left_shoulder_yaw_visual_material"/>
@@ -78,8 +77,7 @@
                          range="-0.785398 0.785398"/>
                   <inertial pos="0 0 0.005" mass="0.000826239"
                             fullinertia="1.20493e-08 1.20493e-08 1.0328e-08 0 0 0"/>
-                  <geom class="hum_collision" pos="0 0 -0.01" quat="0 1 0 0" type="cylinder" size="0.03 0.06"
-                        contype="0" conaffinity="0"/>
+                  <geom class="hum_collision" pos="0 0 -0.01" quat="0 1 0 0" type="cylinder" size="0.03 0.06"/>
                   <geom type="mesh" class="hum_visual" pos="0 0 0.005"
                         quat="0 0 -0.991445 -0.130526" mesh="hum_arm_left_elbow_roll_visual"
                         material="hum_arm_left_elbow_roll_visual_material"/>
@@ -143,6 +141,13 @@
                   <geom type="mesh" class="hum_visual" pos="0 0 0.005"
                         quat="0 0 0.991445 -0.130526" mesh="hum_arm_right_elbow_roll_visual"
                         material="hum_arm_right_elbow_roll_visual_material"/>
+                  <body name="arm_right_hand_link" pos="0 0 0" quat="0 -0.707107 0.707107 0">
+                    <inertial pos="-0.00248666 0.0134979 -0.0541316" mass="0.291741"
+                              fullinertia="0.000556491 0.000494025 0.000161723 3.82363e-06 -2.67254e-06 -0.000102102"/>
+                    <geom type="mesh" class="hum_visual" pos="-0.00248666 0.0134979 -0.0541316"
+                          quat="0.701057 0.092296 0.092296 0.701057" mesh="hum_arm_right_hand_link_visual"
+                          material="hum_arm_right_hand_link_visual_material"/>
+                  </body>
                 </body>
               </body>
             </body>
@@ -350,7 +355,7 @@
     <position class="berkeley-humanoid-lite" name="hold_arm_right_shoulder_pitch_joint"
               joint="arm_right_shoulder_pitch_joint" ctrlrange="-0.7854 1.5708"/>
     <position class="berkeley-humanoid-lite" name="hold_arm_right_shoulder_roll_joint"
-              joint="arm_right_shoulder_roll_joint" ctrlrange="-1.309 1.309"/>
+              joint="arm_right_shoulder_roll_joint" ctrlrange="-1.309 0.262"/>
     <position class="berkeley-humanoid-lite" name="hold_arm_right_shoulder_yaw_joint"
               joint="arm_right_shoulder_yaw_joint" ctrlrange="-0.7854 0.7854"/>
     <position class="berkeley-humanoid-lite" name="hold_arm_right_elbow_pitch_joint"
