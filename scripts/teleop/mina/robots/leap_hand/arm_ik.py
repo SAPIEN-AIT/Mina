@@ -1,5 +1,5 @@
 """
-arm_ik.py — Kinematic IK for the humanoid right arm.
+arm_ik.py — Generic IK for the humanoid arms (left or right).
 
 Iterative damped least-squares on a *separate* MjData copy, then
 directly sets qpos (kinematic control) with per-frame rate limiting.
@@ -8,23 +8,38 @@ directly sets qpos (kinematic control) with per-frame rate limiting.
 import numpy as np
 import mujoco
 
-_ARM_JOINT_NAMES = [
+# ── Joint / actuator / EE names per side ─────────────────────────────────────
+_RIGHT_JOINTS = [
     "arm_right_shoulder_pitch_joint",
     "arm_right_shoulder_roll_joint",
     "arm_right_shoulder_yaw_joint",
     "arm_right_elbow_pitch_joint",
     "arm_right_elbow_roll_joint",
 ]
-
-_ARM_ACT_NAMES = [
+_RIGHT_ACTS = [
     "hold_arm_right_shoulder_pitch_joint",
     "hold_arm_right_shoulder_roll_joint",
     "hold_arm_right_shoulder_yaw_joint",
     "hold_arm_right_elbow_pitch_joint",
     "hold_arm_right_elbow_roll_joint",
 ]
+_RIGHT_EE = "arm_right_elbow_roll"
 
-_EE_BODY = "arm_right_elbow_roll"
+_LEFT_JOINTS = [
+    "arm_left_shoulder_pitch_joint",
+    "arm_left_shoulder_roll_joint",
+    "arm_left_shoulder_yaw_joint",
+    "arm_left_elbow_pitch_joint",
+    "arm_left_elbow_roll_joint",
+]
+_LEFT_ACTS = [
+    "hold_arm_left_shoulder_pitch_joint",
+    "hold_arm_left_shoulder_roll_joint",
+    "hold_arm_left_shoulder_yaw_joint",
+    "hold_arm_left_elbow_pitch_joint",
+    "hold_arm_left_elbow_roll_joint",
+]
+_LEFT_EE = "arm_left_elbow_roll"
 
 
 def _quat_error(target_quat, current_quat):
@@ -50,15 +65,24 @@ def _quat_error(target_quat, current_quat):
 
 
 class ArmIKSolver:
-    """Iterative DLS IK with direct kinematic qpos control."""
+    """Iterative DLS IK with direct kinematic qpos control.
+
+    Parameters
+    ----------
+    model : MjModel
+    side : str
+        ``"right"`` or ``"left"``.
+    """
 
     def __init__(self, model: mujoco.MjModel,
+                 side: str = "right",
                  damping: float = 1e-2,
                  max_iter: int = 50,
                  tol: float = 1e-3,
                  ik_step: float = 0.5,
-                 max_delta_per_frame: float = 0.08,
+                 max_delta_per_frame: float = 0.12,
                  orient_weight: float = 0.0):
+        self.side = side
         self.damping = damping
         self.max_iter = max_iter
         self.tol = tol
@@ -66,11 +90,18 @@ class ArmIKSolver:
         self.max_delta = max_delta_per_frame
         self.orient_weight = orient_weight
 
-        self.ee_body_id = model.body(_EE_BODY).id
-        self.n_arm = len(_ARM_JOINT_NAMES)
+        if side == "right":
+            jnt_names, act_names, ee_body = _RIGHT_JOINTS, _RIGHT_ACTS, _RIGHT_EE
+        elif side == "left":
+            jnt_names, act_names, ee_body = _LEFT_JOINTS, _LEFT_ACTS, _LEFT_EE
+        else:
+            raise ValueError(f"side must be 'right' or 'left', got {side!r}")
+
+        self.ee_body_id = model.body(ee_body).id
+        self.n_arm = len(jnt_names)
 
         self.jnt_ids = np.array(
-            [model.joint(n).id for n in _ARM_JOINT_NAMES], dtype=int)
+            [model.joint(n).id for n in jnt_names], dtype=int)
         self.qpos_adr = np.array(
             [model.jnt_qposadr[j] for j in self.jnt_ids], dtype=int)
         self.dof_adr = np.array(
@@ -81,11 +112,12 @@ class ArmIKSolver:
 
         self.act_indices = np.array(
             [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
-             for n in _ARM_ACT_NAMES], dtype=int)
+             for n in act_names], dtype=int)
 
         self._ik_data = mujoco.MjData(model)
         self.jacp = np.zeros((3, model.nv))
         self.jacr = np.zeros((3, model.nv))
+        self._last_q = None
 
     def solve(self, model: mujoco.MjModel, data: mujoco.MjData,
               target_pos: np.ndarray, target_quat: np.ndarray) -> dict:
@@ -97,7 +129,6 @@ class ArmIKSolver:
 
         cur_arm_q = data.qpos[self.qpos_adr].copy()
 
-        # --- Iterative IK on a separate MjData (no side effects) ---
         d = self._ik_data
         d.qpos[:] = data.qpos
 
@@ -105,22 +136,26 @@ class ArmIKSolver:
             mujoco.mj_forward(model, d)
 
             ee_pos = d.xpos[self.ee_body_id]
-            ee_quat = d.xquat[self.ee_body_id]
 
             pos_err = target_pos - ee_pos
-            rot_err = _quat_error(target_quat, ee_quat) * self.orient_weight
-            err = np.concatenate([pos_err, rot_err])
-
-            if np.linalg.norm(err) < self.tol:
-                break
 
             mujoco.mj_jacBody(model, d, self.jacp, self.jacr,
                               self.ee_body_id)
 
-            J = np.vstack([
-                self.jacp[:, self.dof_adr],
-                self.jacr[:, self.dof_adr],
-            ])
+            Jp = self.jacp[:, self.dof_adr]
+
+            if self.orient_weight > 1e-6:
+                ee_quat = d.xquat[self.ee_body_id]
+                rot_err = _quat_error(target_quat, ee_quat) * self.orient_weight
+                Jr = self.jacr[:, self.dof_adr]
+                J = np.vstack([Jp, Jr])
+                err = np.concatenate([pos_err, rot_err])
+            else:
+                J = Jp
+                err = pos_err
+
+            if np.linalg.norm(err) < self.tol:
+                break
 
             JtJ = J.T @ J + self.damping * np.eye(self.n_arm)
             dq = np.linalg.solve(JtJ, J.T @ err)
@@ -132,18 +167,18 @@ class ArmIKSolver:
 
         ik_target = d.qpos[self.qpos_adr].copy()
 
-        # --- Rate-limit the joint change per frame ---
         delta = ik_target - cur_arm_q
         delta = np.clip(delta, -self.max_delta, self.max_delta)
         new_q = cur_arm_q + delta
         new_q = np.clip(new_q, self.jnt_range[:, 0],
                          self.jnt_range[:, 1])
 
-        # --- Write kinematically: qpos, zero velocity, matching ctrl ---
         data.qpos[self.qpos_adr] = new_q
         data.qvel[self.dof_adr] = 0.0
         for i, act_idx in enumerate(self.act_indices):
             data.ctrl[act_idx] = new_q[i]
+
+        self._last_q = new_q.copy()
 
         ee_pos = data.xpos[self.ee_body_id]
         err_mm = np.linalg.norm(target_pos - ee_pos) * 1000
@@ -151,9 +186,7 @@ class ArmIKSolver:
         return {"deg": deg, "err_mm": err_mm}
 
     def clamp_after_step(self, data: mujoco.MjData) -> None:
-        """Enforce joint limits after mj_step (physics can violate them)."""
-        q = data.qpos[self.qpos_adr]
-        clamped = np.clip(q, self.jnt_range[:, 0], self.jnt_range[:, 1])
-        if not np.allclose(q, clamped):
-            data.qpos[self.qpos_adr] = clamped
+        """Re-assert arm joints after mj_step so physics drift doesn't accumulate."""
+        if self._last_q is not None:
+            data.qpos[self.qpos_adr] = self._last_q
             data.qvel[self.dof_adr] = 0.0

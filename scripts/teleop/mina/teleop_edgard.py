@@ -83,7 +83,7 @@ WRIST_DZ_RX    = 0.03   # rad (~7°) — deadzone pitch
 WRIST_DZ_RY    = 0.12   # rad — larger yaw deadzone to reduce twitch
 WRIST_DZ_RZ    = 0.12   # rad (~6°) — deadzone roll
 WRIST_MAX_RAD  = 2.0    # max clamp (~45°, reduced to avoid vibration at limits)
-MOCAP_MAX_STEP = 0.010  # max position change per frame (m) — prevents teleportation
+MOCAP_MAX_STEP = 0.015  # max position change per frame (m) — prevents teleportation
 RY_POS_BOOST   = 1.2    # reduced yaw sensitivity (positive side)
 RY_NEG_BOOST   = 2.0    # reduced yaw sensitivity (negative side)
 RZ_RY_DECOUPLE = 0.6    # subtract this × Ry from Rz to cancel cross-talk
@@ -103,6 +103,7 @@ BASE_QUAT = np.array([0.0, 1.0, 0.0, 0.0])   # Rx(180°): palm facing up (stable
 # ZED is a non-mirrored camera: your RIGHT hand appears on the LEFT side of the
 # image, so MediaPipe labels it "Left".  Flip to "Right" if using a mirrored cam.
 TARGET_HAND   = "Left"   # tracks your physical right hand on a non-mirrored ZED
+OTHER_HAND    = "Right"  # your physical left hand on a non-mirrored ZED
 
 # cv2.imshow conflicts with mjpython's Cocoa event loop on macOS.
 # Set to True only when running with plain `python` (not `mjpython`).
@@ -126,6 +127,18 @@ def _quat_ensure_hemi(q: np.ndarray, ref: np.ndarray) -> np.ndarray:
     return -q if np.dot(q, ref) < 0 else q
 
 
+# ── Hand selection helper ──────────────────────────────────────────────────────
+def _find_hand_by_label(result, label: str):
+    """Return (landmarks, score) for the hand matching *label*, or (None, 0)."""
+    if not result.multi_hand_landmarks or not result.multi_handedness:
+        return None, 0.0
+    for i, hand_class in enumerate(result.multi_handedness):
+        cls = hand_class.classification[0]
+        if cls.label == label:
+            return result.multi_hand_landmarks[i], cls.score
+    return None, 0.0
+
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _DIR       = os.path.dirname(os.path.abspath(__file__))
 _SCENE_XML = os.path.join(_DIR, "robots", "leap_hand", "scene.xml")
@@ -133,19 +146,26 @@ _SCENE_XML = os.path.join(_DIR, "robots", "leap_hand", "scene.xml")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _init_hand(model: mujoco.MjModel, data: mujoco.MjData,
-               arm_ik: 'ArmIKSolver | None' = None) -> np.ndarray:
+               arm_ik: 'ArmIKSolver | None' = None,
+               left_arm_ik: 'ArmIKSolver | None' = None) -> np.ndarray:
     """
-    Teleport the LEAP palm and optionally set the arm initial pose.
+    Teleport the LEAP palm and set both arms to bent rest poses.
 
-    Returns the offset (hand_proxy_pos − arm_ee_pos) at init time so the
-    arm can follow the hand without being glued to it.
+    Returns the offset (hand_proxy_pos − right arm_ee_pos) at init time.
     """
-    # Set right arm to a bent rest pose so the IK solver has good coverage
+    # Right arm: bent rest pose
     if arm_ik is not None:
         sp_jid = model.joint("arm_right_shoulder_pitch_joint").id
         ep_jid = model.joint("arm_right_elbow_pitch_joint").id
         data.qpos[model.jnt_qposadr[sp_jid]] = np.pi / 2
         data.qpos[model.jnt_qposadr[ep_jid]] = -np.pi / 4
+
+    # Left arm: mirrored bent rest pose
+    if left_arm_ik is not None:
+        sp_jid = model.joint("arm_left_shoulder_pitch_joint").id
+        ep_jid = model.joint("arm_left_elbow_pitch_joint").id
+        data.qpos[model.jnt_qposadr[sp_jid]] = -np.pi / 2
+        data.qpos[model.jnt_qposadr[ep_jid]] = np.pi / 4
 
     mid  = model.body("hand_proxy").mocapid[0]
     pos  = np.array([0.0, START_Y, START_Z])
@@ -161,14 +181,14 @@ def _init_hand(model: mujoco.MjModel, data: mujoco.MjData,
     data.qpos[addr:addr+3] = pos
     data.qpos[addr+3:addr+7] = palm_quat_init
 
-    # Lock arm actuators at their current qpos so the robot stays still
-    if arm_ik is not None:
-        for i, act_idx in enumerate(arm_ik.act_indices):
-            data.ctrl[act_idx] = data.qpos[arm_ik.qpos_adr[i]]
+    # Lock arm actuators at their current qpos
+    for ik_solver in (arm_ik, left_arm_ik):
+        if ik_solver is not None:
+            for i, act_idx in enumerate(ik_solver.act_indices):
+                data.ctrl[act_idx] = data.qpos[ik_solver.qpos_adr[i]]
 
     mujoco.mj_forward(model, data)
 
-    # Return the spatial offset between hand_proxy and arm EE
     if arm_ik is not None:
         return pos - data.xpos[arm_ik.ee_body_id].copy()
     return np.zeros(3)
@@ -185,18 +205,19 @@ def _update(data:       mujoco.MjData,
             yaw_f:      OneEuroFilter,
             mid:        int,
             arm_ik:     'ArmIKSolver | None' = None,
-            arm_offset: np.ndarray = np.zeros(3)) -> None:
+            arm_offset: np.ndarray = np.zeros(3),
+            left_arm_ik: 'ArmIKSolver | None' = None,
+            left_pos_f:  'OneEuroFilter | None' = None) -> None:
     """
     Single-frame update: capture → detect → retarget → actuate.
 
-    Left camera drives finger retargeting (always).
-    When STEREO_DEPTH=True, both cameras triangulate wrist depth for sim-Y.
-    If stereo fails on a frame, the last good position is kept but fingers
-    still update — no frame is ever fully dropped.
+    Right physical hand → LEAP fingers + right arm IK.
+    Left physical hand  → left arm IK (position only).
     """
-    global _wrist_ref_angle, _wrist_calib_count, _pitch_ref_angle, _pitch_calib_count, _yaw_ref_angle, _yaw_calib_count, _last_hand_time, _calibrate_flag
+    global _wrist_ref_angle, _wrist_calib_count, _pitch_ref_angle, _pitch_calib_count, _yaw_ref_angle, _yaw_calib_count, _last_hand_time, _calibrate_flag, _left_calib_flag, _left_ref_pos, _left_ee_start, _last_left_target, _left_mono_ref_span
     import time as _time
     ik_info = None
+    left_ik_info = None
     frame_l, frame_r = zed.get_frames()
     if frame_l is None:
         return
@@ -211,14 +232,29 @@ def _update(data:       mujoco.MjData,
         joint_f.reset()
         data.ctrl[:] = 0.0
         data.qvel[:] = 0.0
-        _init_hand(data.model, data, arm_ik)
+        _left_ref_pos = None
+        _last_left_target = None
+        _left_mono_ref_span = None
+        if left_pos_f is not None:
+            left_pos_f.reset()
+        _init_hand(data.model, data, arm_ik, left_arm_ik)
         print("[RESET] Hand position, fingers & calibration reset (R key)")
 
     h, w, _ = frame_l.shape
     res_l, res_r = tracker.process(frame_l, frame_r)
 
-    # ── Left camera must see a hand to do anything ────────────────────────
-    if not res_l.multi_hand_landmarks:
+    # ── Find each hand by handedness label ──────────────────────────────
+    lm_target, target_score = _find_hand_by_label(res_l, TARGET_HAND)
+    lm_other,  other_score  = _find_hand_by_label(res_l, OTHER_HAND)
+
+    # Also look for hands in right camera (for stereo)
+    lm_target_r, _ = _find_hand_by_label(res_r, TARGET_HAND)
+    lm_other_r,  _ = _find_hand_by_label(res_r, OTHER_HAND)
+
+    # ── Target hand (your physical right) must be visible to control ────
+    elapsed_since_start = _time.monotonic() - _start_time if _start_time else 0
+
+    if lm_target is None:
         elapsed = _time.monotonic() - _last_hand_time
         holding = elapsed < HOLD_POSE_SEC and _last_hand_time > 0
 
@@ -231,13 +267,22 @@ def _update(data:       mujoco.MjData,
         hold_label = f"HOLD {HOLD_POSE_SEC - elapsed:.1f}s" if holding else "NO HAND"
         hold_col   = (0, 200, 255) if holding else (0, 0, 255)
         if SHOW_CAMERA:
-            cv2.putText(frame_l, f"L: {hold_label}", (20, 40),
+            h_no, w_no, _ = frame_l.shape
+            cv2.putText(frame_l, f"R.hand: {hold_label}", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, hold_col, 2)
+            if lm_other is not None:
+                cv2.putText(frame_l, f"L.hand: OK ({other_score:.0%})", (20, 75),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 0), 2)
+            else:
+                cv2.putText(frame_l, "L.hand: ---", (20, 75),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 100), 1)
+            if _wrist_ref_angle is None:
+                remaining = max(0, AUTO_CALIB_SEC - elapsed_since_start)
+                cv2.putText(frame_l, f"CALIBRATION DANS {remaining:.1f}s", (20, h_no // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+            tracker.draw_landmarks(frame_l, res_l)
             if frame_r is not None:
-                r_det = "R: HAND" if res_r.multi_hand_landmarks else "R: NO HAND"
-                r_col = (0, 220, 0) if res_r.multi_hand_landmarks else (0, 0, 255)
-                cv2.putText(frame_r, r_det, (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, r_col, 2)
+                tracker.draw_landmarks(frame_r, res_r)
                 _show(np.hstack([frame_l, frame_r]))
             else:
                 _show(frame_l)
@@ -247,7 +292,7 @@ def _update(data:       mujoco.MjData,
 
     _last_hand_time = _time.monotonic()
 
-    lm_l = res_l.multi_hand_landmarks[0].landmark
+    lm_l = lm_target.landmark
     cam   = geo.ZED2I
 
     # ── Palm center position (avg of wrist + 4 MCP) ────────────────────
@@ -264,8 +309,8 @@ def _update(data:       mujoco.MjData,
     hud_col    = (0, 165, 255) # orange = mono
     hud_detail = ""
 
-    if STEREO_DEPTH and res_r.multi_hand_landmarks:
-        lm_r = res_r.multi_hand_landmarks[0].landmark
+    if STEREO_DEPTH and lm_target_r is not None:
+        lm_r = lm_target_r.landmark
         py_l = int(lm_l[0].y * h)
         py_r = int(lm_r[0].y * h)
         valid, epi_err = geo.check_epipolar_constraint(
@@ -306,8 +351,10 @@ def _update(data:       mujoco.MjData,
     dz_y = pky_mcp_y.z - idx_mcp_y.z
     raw_yaw = dz_y / max(abs(dx_y), 0.01)
 
-    # ── Press A → snapshot current orientation as reference ───────────
-    if _calibrate_flag:
+    # ── Auto-calibration: triggers after AUTO_CALIB_SEC or on A key ──
+    elapsed_since_start = _time.monotonic() - _start_time if _start_time else 0
+    auto_trigger = (_wrist_ref_angle is None and elapsed_since_start >= AUTO_CALIB_SEC)
+    if _calibrate_flag or auto_trigger:
         _wrist_ref_angle = raw_angle
         _pitch_ref_angle = raw_pitch
         _yaw_ref_angle   = raw_yaw
@@ -317,7 +364,8 @@ def _update(data:       mujoco.MjData,
         pos_f.reset()
         joint_f.reset()
         _calibrate_flag = False
-        print("[CALIB] Orientation de référence capturée.")
+        _left_calib_flag = True
+        print("[CALIB] Orientation de référence capturée (auto)." if auto_trigger else "[CALIB] Orientation de référence capturée.")
 
     # ── Before calibration: hand frozen at start pose ─────────────────
     if _wrist_ref_angle is None:
@@ -407,24 +455,99 @@ def _update(data:       mujoco.MjData,
             q_smooth[i] = np.clip(q_smooth[i], lo, hi)
         data.ctrl[:n_leap] = q_smooth
 
+    # ── Left arm IK: physical left hand drives the left arm ──────────────
+    if left_arm_ik is not None and lm_other is not None:
+        lm_left = lm_other.landmark
+        cam = geo.ZED2I
+
+        _palm_ids = (0, 5, 9, 13, 17)
+        u_lh = sum(lm_left[i].x for i in _palm_ids) / len(_palm_ids) * w
+        v_lh = sum(lm_left[i].y for i in _palm_ids) / len(_palm_ids) * h
+
+        lh_x = (u_lh - cam.cx) / cam.fx * START_Y * TRANS_SCALE
+        lh_z = START_Z + (-(v_lh - cam.cy) / cam.fy * START_Y) * TRANS_SCALE
+        lh_y = START_Y
+
+        # Palm length in pixels (wrist→middle MCP) for mono depth estimation
+        lh_span = np.hypot(lm_left[9].x * w - lm_left[0].x * w,
+                           lm_left[9].y * h - lm_left[0].y * h)
+
+        stereo_ok = False
+        if STEREO_DEPTH and lm_other_r is not None:
+            lm_lr = lm_other_r.landmark
+            py_l = int(lm_left[0].y * h)
+            py_r = int(lm_lr[0].y * h)
+            valid, _ = geo.check_epipolar_constraint(py_l, py_r, tolerance_px=EPIPOLAR_TOL)
+            if valid:
+                p3d = geo.stereo_hand_3d(lm_left, lm_lr, w, h,
+                                          depth_min_m=DEPTH_MIN_M,
+                                          depth_max_m=DEPTH_MAX_M)
+                if p3d is not None:
+                    x_m, y_m, z_m = p3d
+                    lh_x = -x_m * TRANS_SCALE
+                    lh_y = START_Y + (DEPTH_MID_M - z_m) * DEPTH_SCALE * TRANS_SCALE
+                    lh_z = START_Z + (-y_m) * TRANS_SCALE
+                    stereo_ok = True
+
+        # Mono depth fallback: estimate depth from apparent hand size
+        if not stereo_ok and _left_mono_ref_span is not None and lh_span > 10:
+            mono_depth_m = DEPTH_MID_M * _left_mono_ref_span / lh_span
+            mono_depth_m = float(np.clip(mono_depth_m, DEPTH_MIN_M, DEPTH_MAX_M))
+            lh_y = START_Y + (DEPTH_MID_M - mono_depth_m) * DEPTH_SCALE * TRANS_SCALE
+
+        raw_lh_pos = np.array([lh_x, lh_y, lh_z])
+
+        if _left_calib_flag:
+            _left_ref_pos = raw_lh_pos.copy()
+            _left_mono_ref_span = lh_span if lh_span > 10 else None
+            mujoco.mj_forward(data.model, data)
+            _left_ee_start = data.xpos[left_arm_ik.ee_body_id].copy()
+            _last_left_target = None
+            if left_pos_f is not None:
+                left_pos_f.reset()
+            _left_calib_flag = False
+            print(f"[CALIB] Left arm reference captured (palm span={lh_span:.0f}px).")
+
+        if _left_ref_pos is not None:
+            delta_lh = raw_lh_pos - _left_ref_pos
+            target_lh = _left_ee_start + delta_lh
+            if left_pos_f is not None:
+                target_lh = left_pos_f(target_lh)
+            if _last_left_target is not None:
+                delta_lt = target_lh - _last_left_target
+                dist_lt = np.linalg.norm(delta_lt)
+                if dist_lt > MOCAP_MAX_STEP:
+                    target_lh = _last_left_target + delta_lt * (MOCAP_MAX_STEP / dist_lt)
+            _last_left_target = target_lh.copy()
+            no_orient = np.array([1.0, 0.0, 0.0, 0.0])
+            left_ik_info = left_arm_ik.solve(data.model, data, target_lh, no_orient)
+
     if SHOW_CAMERA:
         tracker.draw_landmarks(frame_l, res_l)
 
-        # Top-left: mode indicator
+        # Top-left: mode + hand detection status
         cv2.putText(frame_l, hud_mode, (20, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, hud_col, 2)
         if hud_detail:
             cv2.putText(frame_l, hud_detail, (20, 62),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, hud_col, 1)
 
-        # Calibration status banner
+        # Hand detection status (both hands)
+        rh_col = (0, 220, 0) if lm_target is not None else (0, 0, 255)
+        rh_txt = f"R.hand: OK ({target_score:.0%})" if lm_target is not None else "R.hand: ---"
+        lh_col = (0, 220, 0) if lm_other is not None else (100, 100, 100)
+        lh_txt = f"L.hand: OK ({other_score:.0%})" if lm_other is not None else "L.hand: ---"
+        cv2.putText(frame_l, rh_txt, (20, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, rh_col, 2)
+        cv2.putText(frame_l, lh_txt, (20, 118),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, lh_col, 2)
+
+        # Calibration status banner with countdown
         if _wrist_ref_angle is None:
-            calib_txt = "NON CALIBRE — Appuyez sur A (MuJoCo)"
+            remaining = max(0, AUTO_CALIB_SEC - elapsed_since_start)
+            calib_txt = f"CALIBRATION DANS {remaining:.1f}s"
             cv2.putText(frame_l, calib_txt, (20, h // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-        else:
-            cv2.putText(frame_l, "CALIBRE (A = recalibrer)", (20, 90),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
 
         # Top-right: depth readout (large)
         if depth_cm is not None:
@@ -463,18 +586,19 @@ def _update(data:       mujoco.MjData,
         # Show both cameras side by side with detection status
         if frame_r is not None:
             tracker.draw_landmarks(frame_r, res_r)
-            r_det = "R: HAND" if res_r.multi_hand_landmarks else "R: NO HAND"
-            r_col = (0, 220, 0) if res_r.multi_hand_landmarks else (0, 0, 255)
+            n_hands_r = len(res_r.multi_hand_landmarks) if res_r.multi_hand_landmarks else 0
+            r_det = f"R.cam: {n_hands_r} hand(s)"
+            r_col = (0, 220, 0) if n_hands_r > 0 else (0, 0, 255)
             cv2.putText(frame_r, r_det, (20, 35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, r_col, 2)
 
-            # ── ARM IK HUD (bottom-right of right frame, large text) ──
+            # ── RIGHT ARM IK HUD (bottom-right of right frame) ──
             if ik_info is not None:
                 d = ik_info["deg"]
                 err = ik_info["err_mm"]
                 err_col = (0, 220, 0) if err < 30 else (0, 165, 255) if err < 80 else (0, 0, 255)
                 _ik_lines = [
-                    (f"ARM IK  err={err:.0f}mm", err_col),
+                    (f"R.ARM  err={err:.0f}mm", err_col),
                     (f"sh_p={d[0]:+5.0f}  sh_r={d[1]:+5.0f}  sh_y={d[2]:+5.0f}", (200, 200, 200)),
                     (f"el_p={d[3]:+5.0f}  el_r={d[4]:+5.0f}", (200, 200, 200)),
                 ]
@@ -482,6 +606,21 @@ def _update(data:       mujoco.MjData,
                     y_pos = h - 30 - (len(_ik_lines) - 1 - li) * 40
                     sz = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
                     cv2.putText(frame_r, txt, (w - sz[0] - 15, y_pos),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, 2)
+
+            # ── LEFT ARM IK HUD (bottom-left of right frame) ──
+            if left_ik_info is not None:
+                dl = left_ik_info["deg"]
+                lerr = left_ik_info["err_mm"]
+                lerr_col = (0, 220, 0) if lerr < 30 else (0, 165, 255) if lerr < 80 else (0, 0, 255)
+                _lk_lines = [
+                    (f"L.ARM  err={lerr:.0f}mm", lerr_col),
+                    (f"sh_p={dl[0]:+5.0f}  sh_r={dl[1]:+5.0f}  sh_y={dl[2]:+5.0f}", (200, 200, 200)),
+                    (f"el_p={dl[3]:+5.0f}  el_r={dl[4]:+5.0f}", (200, 200, 200)),
+                ]
+                for li, (txt, col) in enumerate(_lk_lines):
+                    y_pos = h - 30 - (len(_lk_lines) - 1 - li) * 40
+                    cv2.putText(frame_r, txt, (15, y_pos),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, 2)
 
             display = np.hstack([frame_l, frame_r])
@@ -501,6 +640,17 @@ _frame_q = None
 _show_counter = 0
 _SHOW_EVERY = 5        # send 1 frame out of 5 to the viewer
 _VIEWER_SCALE = 0.35   # stronger downscale for lower CPU/GPU load
+
+# Left arm calibration state
+_left_calib_flag = False
+_left_ref_pos = None
+_left_ee_start = None
+_last_left_target = None
+_left_mono_ref_span = None   # palm length in pixels at calibration (for mono depth)
+
+# Auto-calibration timer (seconds after viewer opens)
+AUTO_CALIB_SEC = 5.0
+_start_time = None      # set once in main()
 
 
 def _show(frame):
@@ -525,16 +675,17 @@ def _show(frame):
 
 
 def _key_callback(keycode):
-    """MuJoCo viewer key callback: press A to (re-)calibrate wrist orientation."""
-    global _calibrate_flag
+    """MuJoCo viewer key callback: press A to (re-)calibrate both hands."""
+    global _calibrate_flag, _left_calib_flag
     if keycode == 65:  # GLFW_KEY_A
         _calibrate_flag = True
-        print("[CALIB] Touche A détectée — calibration au prochain frame avec main visible.")
+        _left_calib_flag = True
+        print("[CALIB] Touche A détectée — calibration des deux mains au prochain frame.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
-    global _frame_q
+    global _frame_q, _start_time
 
     # Hardware
     # Pass y_offset so vertical alignment is ready when STEREO_DEPTH is re-enabled.
@@ -549,17 +700,24 @@ def main():
     # Mocap body index for hand_proxy
     mid = model.body("hand_proxy").mocapid[0]
 
-    # Retargeter, arm IK and filters
-    ik       = IKRetargeter(model)
-    arm_ik   = ArmIKSolver(model)
-    pos_f    = OneEuroFilter(POS_FREQ,    min_cutoff=POS_MC,    beta=POS_BETA)
-    joint_f  = OneEuroFilter(JOINT_FREQ,  min_cutoff=JOINT_MC,  beta=JOINT_BETA)
-    orient_f = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
-    pitch_f  = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
-    yaw_f    = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
+    # Retargeter, arm IK (right + left) and filters
+    ik          = IKRetargeter(model)
+    arm_ik      = ArmIKSolver(model, side="right")
+    left_arm_ik = ArmIKSolver(model, side="left")
+    pos_f       = OneEuroFilter(POS_FREQ,    min_cutoff=POS_MC,    beta=POS_BETA)
+    joint_f     = OneEuroFilter(JOINT_FREQ,  min_cutoff=JOINT_MC,  beta=JOINT_BETA)
+    orient_f    = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
+    pitch_f     = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
+    yaw_f       = OneEuroFilter(WRIST_FREQ, min_cutoff=WRIST_MC, beta=WRIST_BETA)
+    left_pos_f  = OneEuroFilter(POS_FREQ, min_cutoff=POS_MC, beta=POS_BETA)
 
-    # Spawn hand + arm at rest position; get the spatial offset between them
-    arm_offset = _init_hand(model, data, arm_ik)
+    # Spawn hand + arms at rest position
+    arm_offset = _init_hand(model, data, arm_ik, left_arm_ik)
+
+    # Enable clamping from the very first frame (prevents gravity drift
+    # during the pre-calibration period)
+    arm_ik._last_q = data.qpos[arm_ik.qpos_adr].copy()
+    left_arm_ik._last_q = data.qpos[left_arm_ik.qpos_adr].copy()
 
     # Camera viewer in a separate lightweight process (only imports cv2,
     # NOT mujoco — avoids the Cocoa / OpenGL conflict with mjpython on macOS).
@@ -574,20 +732,24 @@ def main():
 
     print("─" * 60)
     print("  Binocular Hand Teleoperation (Direct Angle Retargeting)")
-    print("  Move your right hand in front of the ZED camera.")
-    print("  Press  A  dans le viewer MuJoCo pour calibrer l'orientation.")
-    print("  Press  Q  in the camera window  or  ESC  in the")
-    print("  MuJoCo viewer to quit.")
+    print("  Right hand → LEAP fingers + right arm IK")
+    print("  Left hand  → left arm IK")
+    print(f"  Auto-calibration dans {AUTO_CALIB_SEC:.0f}s (ou touche A)")
+    print("  ESC pour quitter.")
     print("─" * 60)
+
+    import time as _time
+    _start_time = _time.monotonic()
 
     with mujoco.viewer.launch_passive(model, data, key_callback=_key_callback) as v:
         while v.is_running():
             _update(data, zed, tracker, ik, pos_f, joint_f, orient_f, pitch_f, yaw_f,
-                    mid, arm_ik, arm_offset)
+                    mid, arm_ik, arm_offset, left_arm_ik, left_pos_f)
 
             for _ in range(N_SUBSTEPS):
                 mujoco.mj_step(model, data)
-            arm_ik.clamp_after_step(data)
+                arm_ik.clamp_after_step(data)
+                left_arm_ik.clamp_after_step(data)
             v.sync()
 
     # Clean shutdown
