@@ -53,9 +53,11 @@ STEREO_DEPTH = True
 SHOW_CAMERA  = True
 
 # One Euro Filter — position bras
+# POS_MC  : coupure basse fréquence → plus bas = moins de latence, plus de bruit
+# POS_BETA: adaptation vitesse    → plus haut = moins de lag sur mouvements rapides
 POS_FREQ = 30.0
-POS_MC   = 0.8
-POS_BETA = 0.005
+POS_MC   = 0.5    # était 0.8 → moins de lag
+POS_BETA = 0.02   # était 0.005 → meilleure réactivité aux mouvements rapides
 
 # Workspace legacy (TRANS_SCALE, START_Y/Z utilisés pour fallback pixel)
 TRANS_SCALE  = 2.0
@@ -66,15 +68,16 @@ DEPTH_MIN_M  = 0.20
 DEPTH_MAX_M  = 0.90
 DEPTH_MID_M  = 0.45
 DEPTH_SCALE  = 2.0
-MOCAP_MAX_STEP = 0.015
+# Déplacement max par frame : augmenté pour ne pas brider les mouvements rapides
+MOCAP_MAX_STEP = 0.035   # était 0.015
 
 # Morphological calibration
 MORPH_SCALE_MIN = 0.60
 MORPH_SCALE_MAX = 1.50
 
 # Bras — sensibilité
-ARM_RIGHT_GAIN = 2.50
-ARM_LEFT_GAIN  = 2.50
+ARM_RIGHT_GAIN = 1.7
+ARM_LEFT_GAIN  = 1.7
 
 # Torso-relative arm control
 USE_TORSO_RELATIVE = True
@@ -87,7 +90,7 @@ TARGET_HAND = "Left"   # main physique droite sur ZED non-miroir
 OTHER_HAND  = "Right"  # main physique gauche
 
 # Auto-calibration
-AUTO_CALIB_SEC = 5.0
+AUTO_CALIB_SEC = 10.0
 HOLD_POSE_SEC  = 1.0
 
 # ── Gains vitesse buste → command_velocity ────────────────────────────────────
@@ -97,16 +100,13 @@ HOLD_POSE_SEC  = 1.0
 #   VY_GAIN  : latéral MP (mp.x) → gauche robot (vy)
 #   VYAW_GAIN: rotation épaules → lacet robot (vyaw)
 # Ajuster le signe si le mouvement part dans la mauvaise direction.
-VX_GAIN        = 10.0
-VY_GAIN        = 10.0
-VYAW_GAIN      = 4.0
-BUST_VEL_ALPHA   = 0.85   # EMA smoothing — plus élevé = plus lisse, moins de jitter MP
-BUST_VEL_MAX     = 0.8    # clip max (m/s) — 2.0 était trop agressif, humanoid tombe facilement
-# Seuil minimal sur la vitesse lissée en sortie.
-# En dessous → 0 (arrêt propre). La deadzone est sur la sortie, pas sur le déplacement brut.
-BUST_VEL_THRESH  = 0.12   # m/s — plus large pour absorber le bruit du z-axis MediaPipe Pose
-# Décroissance de la vitesse quand la pose n'est plus détectée (facteur par frame à 30 Hz)
-BUST_VEL_DECAY   = 0.80   # 0 = arrêt immédiat, 1 = pas de décroissance
+VX_GAIN        = 8      # gain modéré : signal réel ~0.05-0.15 m/s → sortie 0.3-0.9 m/s
+VY_GAIN        = 8
+VYAW_GAIN      = 1.5
+BUST_VEL_ALPHA   = 0.90   # lissage équilibré : réactif sans exploser sur les spikes MP
+BUST_VEL_MAX     = 0.6    # clip max (m/s)
+BUST_VEL_THRESH  = 0.08   # m/s — deadzone sur la sortie
+BUST_VEL_DECAY   = 0.85   # décroissance si pose perdue (×/frame à 30Hz)
 
 # Caméra viewer
 _SHOW_EVERY   = 5
@@ -411,6 +411,7 @@ _last_hand_time  = 0.0
 _right_ref_pos    = None
 _right_ee_start   = None
 _right_sh_start   = None   # position épaule droite au moment de la calibration (repère monde)
+_last_right_target = None  # dernière cible IK bras droit (pour MOCAP_MAX_STEP)
 _left_ref_pos     = None
 _left_ee_start    = None
 _left_sh_start    = None   # position épaule gauche au moment de la calibration (repère monde)
@@ -492,7 +493,7 @@ def _update(robot:        TeleopMujocoSimulator,
     """
     global _calibrate_flag, _left_calib_flag, _reset_flag
     global _wrist_ref_angle, _pitch_ref_angle, _yaw_ref_angle, _last_hand_time
-    global _right_ref_pos, _right_ee_start, _right_sh_start
+    global _right_ref_pos, _right_ee_start, _right_sh_start, _last_right_target
     global _left_ref_pos, _left_ee_start, _left_sh_start, _last_left_target, _left_mono_ref_span
     global _mp_right_hand_rel_ref, _mp_left_hand_rel_ref
     global _arm_scale_left, _arm_scale_right
@@ -518,7 +519,7 @@ def _update(robot:        TeleopMujocoSimulator,
         pos_f.reset()
         if left_pos_f is not None:
             left_pos_f.reset()
-        _right_ref_pos = None; _right_ee_start = None; _right_sh_start = None
+        _right_ref_pos = None; _right_ee_start = None; _right_sh_start = None; _last_right_target = None
         _left_ref_pos  = None; _left_ee_start  = None; _left_sh_start  = None
         _last_left_target = None; _left_mono_ref_span = None
         _mp_right_hand_rel_ref = None
@@ -657,6 +658,7 @@ def _update(robot:        TeleopMujocoSimulator,
         mujoco.mj_forward(model, data)
         _right_ee_start = data.xpos[ik_right.ee_body_id].copy()
         _right_sh_start = data.xpos[model.body("arm_right_shoulder_pitch").id].copy()
+        _last_right_target = None    # reset pour éviter spike au premier frame
         _mp_right_hand_rel_ref = None  # capture au prochain frame
         _mp_left_hand_rel_ref  = None
 
@@ -694,7 +696,7 @@ def _update(robot:        TeleopMujocoSimulator,
                 _mp_right_hand_rel_ref = hand_rel.copy()
             delta_torso   = (hand_rel - _mp_right_hand_rel_ref) * _arm_scale_right * ARM_RIGHT_GAIN
             # Ancre sur l'épaule courante (compense le déplacement du robot lors de la marche)
-            cur_r_sh      = data.xpos[model.body("arm_right_shoulder_pitch").id]
+            cur_r_sh      = data.xpos[model.body("arm_right_shoulder_pitch").id].copy()
             ee_offset     = _right_ee_start - _right_sh_start
             arm_target_pos = cur_r_sh + ee_offset + delta_torso
         elif _right_ref_pos is not None and _right_ee_start is not None:
@@ -702,6 +704,15 @@ def _update(robot:        TeleopMujocoSimulator,
             arm_target_pos = _right_ee_start + right_delta * _arm_scale_right * ARM_RIGHT_GAIN
 
         if arm_target_pos is not None:
+            # Lissage OneEuro (même traitement que le bras gauche)
+            arm_target_pos = pos_f(arm_target_pos)
+            # Limite de déplacement max par frame (évite les téléportations sur jitter MediaPipe)
+            if _last_right_target is not None:
+                delta_rt = arm_target_pos - _last_right_target
+                dist_rt  = np.linalg.norm(delta_rt)
+                if dist_rt > MOCAP_MAX_STEP:
+                    arm_target_pos = _last_right_target + delta_rt * (MOCAP_MAX_STEP / dist_rt)
+            _last_right_target = arm_target_pos.copy()
             ik_info = ik_right.solve(model, data, arm_target_pos)
             robot._arm_right_q = ik_right._last_q.copy()
 
@@ -844,8 +855,12 @@ def main():
     obs   = robot.reset()
 
     # ── IK solvers pour les bras (modèle BHL) ──────────────────────────────
-    ik_right = _ArmIK(robot.mj_model, side="right")
-    ik_left  = _ArmIK(robot.mj_model, side="left")
+    ik_right = _ArmIK(robot.mj_model, side="right",
+                      ik_max_iters=7, recovery_max_iters=25,
+                      ik_err_stop_mm=8.0, damping=5e-3)
+    ik_left  = _ArmIK(robot.mj_model, side="left",
+                      ik_max_iters=7, recovery_max_iters=25,
+                      ik_err_stop_mm=8.0, damping=5e-3)
     robot._ik_right = ik_right
     robot._ik_left  = ik_left
 
