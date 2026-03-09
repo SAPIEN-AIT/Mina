@@ -75,15 +75,22 @@ MOCAP_MAX_STEP = 0.035   # était 0.015
 MORPH_SCALE_MIN = 0.60
 MORPH_SCALE_MAX = 1.50
 
-# Bras — sensibilité
-ARM_RIGHT_GAIN = 1.7
-ARM_LEFT_GAIN  = 1.7
+# Bras — sensibilité par axe [x-latéral, y-profondeur, z-hauteur] (repère robot)
+# Le z-axis MediaPipe Pose (profondeur mono) est le plus bruité → y-profondeur plus faible.
+# Augmenter un axe = plus de déplacement du bras dans cette direction.
+ARM_RIGHT_AXIS_GAIN = np.array([1.7, 0.9, 2.2])  # [latéral, profondeur, hauteur]
+ARM_LEFT_AXIS_GAIN  = np.array([1.7, 0.9, 2.2])
 
 # Torso-relative arm control
 USE_TORSO_RELATIVE = True
 _MP_SIGN_X = -1.0   # latéral : flip camera non-miroir
 _MP_SIGN_Y = -1.0   # mp.y(up) → robot.z : sens opposé
 _MP_SIGN_Z = -1.0   # mp.z(toward-cam) → robot.y(fwd) : sens opposé
+
+# Référence torse stable : mélange épaule + centre torse (hanches+épaules)
+# 0.0 = épaule pure (ancien comportement)  1.0 = centre torse pur
+# ~0.35 : compense les haussements d'épaules sans sur-compenser les penchements
+TORSO_REF_BLEND = 0.35
 
 # Handedness (ZED non-miroir)
 TARGET_HAND = "Left"   # main physique droite sur ZED non-miroir
@@ -100,11 +107,11 @@ HOLD_POSE_SEC  = 1.0
 #   VY_GAIN  : latéral MP (mp.x) → gauche robot (vy)
 #   VYAW_GAIN: rotation épaules → lacet robot (vyaw)
 # Ajuster le signe si le mouvement part dans la mauvaise direction.
-VX_GAIN        = 8      # gain modéré : signal réel ~0.05-0.15 m/s → sortie 0.3-0.9 m/s
-VY_GAIN        = 8
+VX_GAIN        = 8     # plus haut = robot parcourt plus de distance par mouvement de buste
+VY_GAIN        = 7
 VYAW_GAIN      = 1.5
-BUST_VEL_ALPHA   = 0.90   # lissage équilibré : réactif sans exploser sur les spikes MP
-BUST_VEL_MAX     = 0.6    # clip max (m/s)
+BUST_VEL_ALPHA   = 0.85   # lissage équilibré : réactif sans exploser sur les spikes MP
+BUST_VEL_MAX     = 0.6   # clip max (m/s) — plus haut = plus de distance possible
 BUST_VEL_THRESH  = 0.08   # m/s — deadzone sur la sortie
 BUST_VEL_DECAY   = 0.85   # décroissance si pose perdue (×/frame à 30Hz)
 
@@ -155,7 +162,10 @@ class _ArmIK:
         self.recovery_err_m     = recovery_err_mm / 1000.0
         self.recovery_max_iters = max(self.ik_max_iters, int(recovery_max_iters))
         # Poids per-joint : elbow_pitch (idx 3) préféré (0.25×)
-        self._jnt_w = np.array([1.0, 1.0, 1.0, 0.25, 1.0])
+        # Poids DLS : plus bas = joint utilisé plus librement par l'IK
+        # shoulder_roll (idx 1) et elbow_roll (idx 4) abaissés pour être utilisés
+        # autant que shoulder_pitch et elbow_pitch → mouvements latéraux actifs
+        self._jnt_w = np.array([1.0, 0.3, 1.0, 0.25, 0.3])
 
         jnt_names = _LEFT_JOINTS_BHL if side == "left" else _RIGHT_JOINTS_BHL
         ee_body   = _LEFT_EE_BHL     if side == "left" else _RIGHT_EE_BHL
@@ -362,6 +372,25 @@ def _mp_world_to_robot(delta_mp: np.ndarray) -> np.ndarray:
     ])
 
 
+def _stable_shoulder(plm, side: str) -> np.ndarray:
+    """Épaule stabilisée = épaule pure corrigée par le centre du torse.
+
+    Réduit l'effet des haussements d'épaules sur la commande des bras.
+    side : 'right' (plm[12]) ou 'left' (plm[11])
+    """
+    sh_idx = 12 if side == "right" else 11
+    sh = np.array([plm[sh_idx].x, plm[sh_idx].y, plm[sh_idx].z])
+    # Centre torse = moyenne épaules (11,12) + hanches (23,24)
+    torso = np.array([
+        (plm[11].x + plm[12].x + plm[23].x + plm[24].x) / 4.0,
+        (plm[11].y + plm[12].y + plm[23].y + plm[24].y) / 4.0,
+        (plm[11].z + plm[12].z + plm[23].z + plm[24].z) / 4.0,
+    ])
+    # Mélange : épaule − TORSO_REF_BLEND × (épaule − centre_torse)
+    # = épaule stabilisée vers le centre du torse
+    return sh - TORSO_REF_BLEND * (sh - torso)
+
+
 def _find_hand_by_label(result, label: str):
     if not result.multi_hand_landmarks or not result.multi_handedness:
         return None, 0.0
@@ -541,9 +570,13 @@ def _update(robot:        TeleopMujocoSimulator,
     # ── Vitesse buste depuis épaules ─────────────────────────────────────
     if pose_res is not None and pose_res.pose_world_landmarks is not None:
         plm = pose_res.pose_world_landmarks.landmark
-        lsh = np.array([plm[11].x, plm[11].y, plm[11].z])
-        rsh = np.array([plm[12].x, plm[12].y, plm[12].z])
-        bust_pos = (lsh + rsh) / 2.0
+        lsh  = np.array([plm[11].x, plm[11].y, plm[11].z])
+        rsh  = np.array([plm[12].x, plm[12].y, plm[12].z])
+        lhip = np.array([plm[23].x, plm[23].y, plm[23].z])
+        rhip = np.array([plm[24].x, plm[24].y, plm[24].z])
+        # Moyenne épaules + hanches : les hanches sont plus stables lors des mouvements de bras
+        # → réduit le faux signal de profondeur (z) quand on monte/descend les mains
+        bust_pos = (lsh + rsh + lhip + rhip) / 4.0
 
         # Yaw épaules : angle dans le plan horizontal (x-z de MP world)
         shoulder_vec = rsh - lsh
@@ -689,12 +722,12 @@ def _update(robot:        TeleopMujocoSimulator,
                 and pose_res.pose_world_landmarks is not None
                 and _right_ee_start is not None):
             plm = pose_res.pose_world_landmarks.landmark
-            rsh = np.array([plm[12].x, plm[12].y, plm[12].z])
+            rsh = _stable_shoulder(plm, "right")          # épaule stabilisée (hanche+épaule)
             rwr = np.array([plm[16].x, plm[16].y, plm[16].z])
             hand_rel = _mp_world_to_robot(rwr - rsh)
             if _mp_right_hand_rel_ref is None:
                 _mp_right_hand_rel_ref = hand_rel.copy()
-            delta_torso   = (hand_rel - _mp_right_hand_rel_ref) * _arm_scale_right * ARM_RIGHT_GAIN
+            delta_torso   = (hand_rel - _mp_right_hand_rel_ref) * _arm_scale_right * ARM_RIGHT_AXIS_GAIN
             # Ancre sur l'épaule courante (compense le déplacement du robot lors de la marche)
             cur_r_sh      = data.xpos[model.body("arm_right_shoulder_pitch").id].copy()
             ee_offset     = _right_ee_start - _right_sh_start
@@ -722,7 +755,7 @@ def _update(robot:        TeleopMujocoSimulator,
                 and pose_res is not None
                 and pose_res.pose_world_landmarks is not None):
             plm = pose_res.pose_world_landmarks.landmark
-            lsh = np.array([plm[11].x, plm[11].y, plm[11].z])
+            lsh = _stable_shoulder(plm, "left")           # épaule stabilisée (hanche+épaule)
             lwr = np.array([plm[15].x, plm[15].y, plm[15].z])
             hand_rel_l = _mp_world_to_robot(lwr - lsh)
 
@@ -737,7 +770,7 @@ def _update(robot:        TeleopMujocoSimulator,
                 _left_calib_flag = False
 
             if _mp_left_hand_rel_ref is not None and _left_ee_start is not None:
-                delta_l   = (hand_rel_l - _mp_left_hand_rel_ref) * _arm_scale_left * ARM_LEFT_GAIN
+                delta_l   = (hand_rel_l - _mp_left_hand_rel_ref) * _arm_scale_left * ARM_LEFT_AXIS_GAIN
                 # Ancre sur l'épaule courante (compense le déplacement du robot lors de la marche)
                 cur_l_sh  = data.xpos[model.body("arm_left_shoulder_pitch").id]
                 ee_offset_l = _left_ee_start - _left_sh_start
