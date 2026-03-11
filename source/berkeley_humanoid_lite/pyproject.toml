@@ -33,3 +33,6 @@ repository = "https://github.com/HybridRobotics/Berkeley-Humanoid-Lite"
 [tool.setuptools]
 packages = ["berkeley_humanoid_lite"]
 zip-safe = false 
+
+[tool.uv.extra-build-dependencies]
+flatdict = ["pkg_resources"]

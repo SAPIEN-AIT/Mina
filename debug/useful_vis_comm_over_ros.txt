@@ -1,0 +1,15 @@
+ros2 topic pub /joint_command sensor_msgs/msg/JointState "{
+  name: ['arm_left_shoulder_pitch_joint', 'arm_right_shoulder_pitch_joint'],
+  position: [1.5, 1.5],
+  velocity: [],
+  effort: []
+}" --rate 25
+#ArmsRaise
+
+ros2 topic pub /joint_command sensor_msgs/msg/JointState "{
+  name: ['leg_left_hip_pitch_joint', 'leg_right_hip_pitch_joint', 'leg_left_knee_pitch_joint', 'leg_right_knee_pitch_joint', 'leg_left_ankle_pitch_joint', 'leg_right_ankle_pitch_joint'],
+  position: [-0.2, -0.2, 0.8, 0.8, -0.3, -0.3],
+  velocity: [],
+  effort: []
+}" --rate 25
+#LegsBend

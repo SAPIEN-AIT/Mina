@@ -1,3 +1,10 @@
+"""MuJoCo simulation environments for the Berkeley Humanoid Lite robot.
+
+Provides two environment variants:
+  - MujocoVisualizer: state replay (no PD control, sets qpos/qvel directly).
+  - MujocoSimulator:  closed-loop sim with PD control, gamepad input, and
+                      real-time pacing at the policy rate.
+"""
 
 import time
 import threading
@@ -30,6 +37,8 @@ def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
 
 
 class MujocoEnv:
+    """Base MuJoCo environment — loads MJCF model and creates a passive viewer."""
+
     def __init__(self, cfg: Cfg):
         self.cfg = cfg
 
@@ -47,13 +56,10 @@ class MujocoEnv:
 
 
 class MujocoVisualizer(MujocoEnv):
-    """MuJoCo simulation environment for the Berkeley Humanoid Lite robot.
+    """Open-loop state replay environment (no PD control).
 
-    This class handles the physics simulation, state observation, and control
-    of the robot in the MuJoCo environment.
-
-    Args:
-        cfg (Cfg): Configuration object containing simulation parameters
+    Accepts a full observation vector and sets qpos/qvel directly,
+    then steps physics once. Useful for visualising recorded trajectories.
     """
     def __init__(self, cfg: Cfg):
         super().__init__(cfg)
@@ -73,13 +79,12 @@ class MujocoVisualizer(MujocoEnv):
         self.mj_data.qvel[:] = 0
 
     def step(self, robot_observations: np.array) -> None:
-        """Execute one simulation step with the given actions.
+        """Set qpos/qvel from an observation vector and step physics once.
 
         Args:
-            actions (torch.Tensor): Joint position targets for controlled joints
-
-        Returns:
-            torch.Tensor: Updated observations after executing the action
+            robot_observations (np.array): Flat vector containing base quat,
+                angular velocity, joint positions, joint velocities, mode,
+                and command velocity.
         """
         robot_base_quat = robot_observations[0:4]
         robot_base_ang_vel = robot_observations[4:7]
@@ -100,13 +105,11 @@ class MujocoVisualizer(MujocoEnv):
 
 
 class MujocoSimulator(MujocoEnv):
-    """MuJoCo simulation environment for the Berkeley Humanoid Lite robot.
+    """Closed-loop MuJoCo simulator with PD joint control.
 
-    This class handles the physics simulation, state observation, and control
-    of the robot in the MuJoCo environment.
-
-    Args:
-        cfg (Cfg): Configuration object containing simulation parameters
+    Runs physics at ``cfg.physics_dt`` with ``policy_dt / physics_dt``
+    substeps per policy tick.  Gamepad commands are read in a background
+    thread and folded into the observation vector.
     """
     def __init__(self, cfg: Cfg):
         super().__init__(cfg)

@@ -142,9 +142,9 @@ history_length: 0
 
 # === Command configurations ===
 command_velocity:
-- -0.45280295610427856
-- 0.20867985486984253
-- -1.2906779050827026
+- 0.0
+- 0.0
+- 0.0
 
 # === Action configurations ===
 num_actions: 22

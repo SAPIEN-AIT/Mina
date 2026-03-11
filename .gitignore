@@ -49,4 +49,8 @@ _build
 # Ignore heavy neural network binaries and checkpoint folders
 # **/checkpoints/
 # *.onnx
+
+# Ignore oversized IsaacSim debug logs that exceed GitHub file limits
+debug/policy_actions_isaacsim.log
+debug/policy_observations_isaacsim.log
 *.pt
