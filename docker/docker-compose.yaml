@@ -1,5 +1,14 @@
 x-default-isaac-lab-template-environment: &default-isaac-lab-template-environment
-  - OMNI_KIT_ALLOW_ROOT=1
+  - OMNI_KIT_ALLOW_ROOT=${OMNI_KIT_ALLOW_ROOT:-0}
+  - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+  - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-all}
+  - ACCEPT_EULA=${ACCEPT_EULA:-Y}
+  - PRIVACY_CONSENT=${PRIVACY_CONSENT:-Y}
+  - DISPLAY=${DISPLAY:-}
+  - TERM=${TERM:-xterm-256color}
+  - QT_X11_NO_MITSHM=${QT_X11_NO_MITSHM:-1}
+  - UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-/tmp/mina-uv-env}
+  - UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/mina-uv-cache}
 
 x-default-isaac-lab-template-deploy: &default-isaac-lab-template-deploy
   resources:
@@ -16,14 +25,23 @@ services:
       context: ../
       dockerfile: docker/Dockerfile
       args:
-        - ISAACLAB_BASE_IMAGE_ARG=${ISAACLAB_BASE_IMAGE}
-        - DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH_ARG=${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH}
+        - ISAACLAB_BASE_IMAGE_ARG=${ISAACLAB_BASE_IMAGE:-isaac-lab-base}
+        - DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH_ARG=${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH:-/workspace/isaaclab_extension_template}
     image: isaac-lab-template
     container_name: isaac-lab-template
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    ipc: host  # <--- THIS IS THE FIX: Uses host's unlimited shared memory
     volumes:
       - type: bind
         source: ../
-        target: ${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH}
+        target: ${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH:-/workspace/isaaclab_extension_template}
+      - type: volume
+        source: mina-project-venv
+        target: ${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH:-/workspace/isaaclab_extension_template}/.venv
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+        read_only: true
     network_mode: host
     environment: *default-isaac-lab-template-environment
     deploy: *default-isaac-lab-template-deploy
@@ -31,3 +49,6 @@ services:
     entrypoint: bash
     stdin_open: true
     tty: true
+
+volumes:
+  mina-project-venv:

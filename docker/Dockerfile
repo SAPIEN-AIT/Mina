@@ -8,6 +8,11 @@ ENV DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH=${DOCKER_ISAACLAB_EXTENSION_TEMPLATE
 
 USER root
 
+# Berkeley workflows use `uv run ...`; install uv in the container.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates zenity && \
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy the Isaac Lab Extension Template directory (files to exclude are defined in .dockerignore)
 COPY ../ ${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH}
 
