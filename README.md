@@ -1,6 +1,6 @@
 # Berkeley Humanoid Lite
 
-[![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
+[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](https://docs.python.org/3/whatsnew/3.11.html)
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/license/mit)
 [![License](https://img.shields.io/badge/license-CC%20BY--SA%204.0-orange.svg)](https://creativecommons.org/licenses/by-sa/4.0/)
 
@@ -31,6 +31,102 @@ Except a few edge cases, all the commands should be invoked from the root direct
 Please refer to our [Documentation](https://berkeley-humanoid-lite.gitbook.io/docs) to get started with software and hardware setup.
 
 The latest release of CAD model and 3D print files can be accessed from the [Release](https://berkeley-humanoid-lite.gitbook.io/docs/releases) page.
+
+## How to Run / Quick Start
+
+### Docker Deployment
+
+The finalized Docker workflow is driven by `docker/deploy_all.sh`.
+This script must be run with `sudo` on the host machine because it installs Docker/NVIDIA plumbing when needed, launches the `isaac-sim` container, and registers the local Berkeley packages into the container as the `root` user.
+
+```bash
+cd docker
+chmod +x deploy_all.sh
+sudo ./deploy_all.sh
+```
+
+### Critical Runtime Rules
+
+1. The deployment script installs the local packages inside the container as `root`.
+2. Because of that, all interactive training and playback commands must also run as `root` inside the container.
+3. Do not use plain `python3` inside the container for Isaac Lab tasks.
+4. Always use the Isaac Lab wrapper:
+
+```bash
+/workspace/isaaclab/isaaclab.sh -p
+```
+
+### Option A: Run Training Directly from the Host (Recommended)
+
+```bash
+docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0'
+```
+
+### Option B: Run from Inside the Container
+
+Step 1. Enter the container as `root`:
+
+```bash
+docker exec -u root -it isaac-sim bash
+```
+
+Step 2. Navigate to the project and run training with the Isaac Lab wrapper:
+
+```bash
+cd /workspace/isaaclab/source/standalone/mina_project
+/workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0
+```
+
+### Playback
+
+```bash
+docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-v0'
+```
+
+## Project Overview (Isaac Lab + RSL-RL)
+
+This workspace is configured to train Berkeley Humanoid Lite policies using Isaac Lab (successor to Isaac Gym) and RSL-RL.
+The repository is organized as an Isaac Lab extension, which means the custom robot, assets, and tasks are registered into Isaac Lab through the packages under `source/`.
+
+## Integration Hurdles and Fixes
+
+1. Bash history expansion (`!`) errors
+- Symptom: `bash: !': event not found`
+- Cause: `!` triggers history expansion inside double quotes in interactive bash.
+- Fix: use single quotes around inline Python snippets that include `!`.
+
+2. Isaac Lab API break (`dump_pickle` import)
+- Symptom: `ImportError: cannot import name 'dump_pickle' from isaaclab.utils.io`
+- Cause: helper APIs changed in newer Isaac Lab versions.
+- Fix in `scripts/rsl_rl/train.py`: keep `dump_yaml` import, remove failing `dump_pickle` import, and provide a local `dump_pickle` implementation using Python stdlib `pickle`.
+
+3. Docker log permission failures in `/tmp`
+- Symptom: permission denied while simulator writes internal logs.
+- Cause: internal Isaac Sim/Lab logs may target directories with restricted permissions in some container setups.
+- Fix in `scripts/rsl_rl/train.py`: set `env_cfg.sim.log_dir` to `logs/rsl_rl/<experiment>/isaaclab`.
+
+4. Module registration and Python-version mismatch
+- Symptoms: `ModuleNotFoundError: berkeley_humanoid_lite`, plus Python requirement mismatch.
+- Cause: package not installed into active environment and metadata constraints differ across image/runtime versions.
+- Fix: install the workspace in editable mode when needed:
+
+```bash
+pip install -e . --ignore-requires-python
+```
+
+5. Omniverse EULA gating
+- Symptom: run blocked at startup waiting for EULA acceptance.
+- Fix: run training with:
+
+```bash
+OMNI_KIT_ACCEPT_EULA=Y ACCEPT_EULA=Y UV_PROJECT_ENVIRONMENT=.venv \
+uv run ./scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0 --headless
+```
+
+## Valid Task IDs
+
+- `Velocity-Berkeley-Humanoid-Lite-v0` (full humanoid)
+- `Velocity-Berkeley-Humanoid-Lite-Biped-v0` (biped variant)
 
 
 ## Contributing

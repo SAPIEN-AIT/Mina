@@ -1,54 +1,32 @@
-x-default-isaac-lab-template-environment: &default-isaac-lab-template-environment
-  - OMNI_KIT_ALLOW_ROOT=${OMNI_KIT_ALLOW_ROOT:-0}
-  - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
-  - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-all}
-  - ACCEPT_EULA=${ACCEPT_EULA:-Y}
-  - PRIVACY_CONSENT=${PRIVACY_CONSENT:-Y}
-  - DISPLAY=${DISPLAY:-}
-  - TERM=${TERM:-xterm-256color}
-  - QT_X11_NO_MITSHM=${QT_X11_NO_MITSHM:-1}
-  - UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-/tmp/mina-uv-env}
-  - UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/mina-uv-cache}
-
-x-default-isaac-lab-template-deploy: &default-isaac-lab-template-deploy
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: all
-          capabilities: [ gpu ]
-
 services:
-  isaac-lab-template:
-    env_file: .env.base
-    build:
-      context: ../
-      dockerfile: docker/Dockerfile
-      args:
-        - ISAACLAB_BASE_IMAGE_ARG=${ISAACLAB_BASE_IMAGE:-isaac-lab-base}
-        - DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH_ARG=${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH:-/workspace/isaaclab_extension_template}
-    image: isaac-lab-template
-    container_name: isaac-lab-template
-    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
-    ipc: host  # <--- THIS IS THE FIX: Uses host's unlimited shared memory
-    volumes:
-      - type: bind
-        source: ../
-        target: ${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH:-/workspace/isaaclab_extension_template}
-      - type: volume
-        source: mina-project-venv
-        target: ${DOCKER_ISAACLAB_EXTENSION_TEMPLATE_PATH:-/workspace/isaaclab_extension_template}/.venv
-      - type: bind
-        source: /etc/localtime
-        target: /etc/localtime
-        read_only: true
-    network_mode: host
-    environment: *default-isaac-lab-template-environment
-    deploy: *default-isaac-lab-template-deploy
-    # This is the entrypoint for the container
+  isaac-sim:
+    container_name: isaac-sim
+    image: nvcr.io/nvidia/isaac-lab:${ISAAC_LAB_VERSION}
     entrypoint: bash
-    stdin_open: true
-    tty: true
-
-volumes:
-  mina-project-venv:
+    stdin_open: true 
+    tty: true        
+    network_mode: host
+    user: "${UID}:${GID}"
+    environment:
+      - ACCEPT_EULA=${ACCEPT_EULA}
+      - PRIVACY_CONSENT=${PRIVACY_CONSENT}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      # Official NVIDIA Cache Mappings
+      - ${CACHE_DIR}/cache/kit:/isaac-sim/kit/cache:rw
+      - ${CACHE_DIR}/cache/ov:/root/.cache/ov:rw
+      - ${CACHE_DIR}/cache/pip:/root/.cache/pip:rw
+      - ${CACHE_DIR}/cache/glcache:/root/.cache/nvidia/GLCache:rw
+      - ${CACHE_DIR}/cache/computecache:/root/.nv/ComputeCache:rw
+      - ${CACHE_DIR}/logs:/root/.nvidia-omniverse/logs:rw
+      - ${CACHE_DIR}/data:/root/.local/share/ov/data:rw
+      - ${CACHE_DIR}/documents:/root/Documents:rw
+      # Your code mount
+      - ../:/workspace/isaaclab/source/standalone/mina_project:rw
+    working_dir: /workspace/isaaclab/source/standalone/mina_project

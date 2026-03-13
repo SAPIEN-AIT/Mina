@@ -19,5 +19,15 @@ recordings/
 # ignore __pycache__
 **/__pycache__/
 **/*.egg-info/
+# ignore local python environments and caches
+.venv/
+**/.venv/
+.cache/
+**/.cache/
+# ignore local ROS workspaces/build artifacts
+ros_workspaces/
+**/build/
+**/install/
+**/log/
 # ignore isaac sim symlink
 _isaac_sim?

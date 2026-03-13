@@ -15,3 +15,84 @@ Launch sim2sim (MuJoCo), last training:
 
 Launch sim2sim (MuJoCo), specific model:
     uv run ./scripts/sim2sim/play_mujoco.py --config ./configs/policy_Mina_loc_vel.yaml
+
+# ── Finalized Isaac Lab Docker workflow ─────────────────────────────
+
+Deploy everything from the host (required):
+    cd docker
+    chmod +x deploy_all.sh
+    sudo ./deploy_all.sh
+
+Train humanoid from the host (recommended):
+    docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0'
+
+Train biped from the host:
+    docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-Biped-v0'
+
+Enter container as root:
+    docker exec -u root -it isaac-sim bash
+
+Inside-container training command:
+    cd /workspace/isaaclab/source/standalone/mina_project
+    /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0
+
+Inside-container playback command:
+    /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-v0
+
+# ── Docker (branch: docker_finetuning) ───────────────────────────────
+
+Rebuild base image (only needed if IsaacSim version changes):
+    cd ~/dev/IsaacLab && python3 docker/container.py build base
+
+Build Mina image:
+    cd ~/dev/Mina && docker compose -f docker/docker-compose.yaml build isaac-lab-template
+
+Smoke test (no GPU):
+    docker compose -f docker/docker-compose.yaml run --rm isaac-lab-template -c \
+      '/.venv/bin/python3 --version && readlink -f /.venv/bin/python3 && id && echo SMOKE_OK'
+
+Write-path test (verify runtime dirs are writable as non-root):
+    docker compose -f docker/docker-compose.yaml run --rm isaac-lab-template -c '
+      set -e
+      touch /root/.cache/ov/test
+      touch /root/.cache/pip/test
+      touch /root/.cache/nvidia/GLCache/test
+      touch /root/.nv/ComputeCache/test
+      touch /root/.nvidia-omniverse/logs/test
+      touch /root/.local/share/ov/data/test
+      touch /root/Documents/test
+      echo WRITE_OK'
+
+GPU check:
+    docker compose -f docker/docker-compose.yaml run --rm isaac-lab-template -c \
+      '/.venv/bin/python3 -c "import torch; print(f\"CUDA: {torch.cuda.is_available()}, devices: {torch.cuda.device_count()}\")"'
+
+List available tasks:
+    docker compose -f docker/docker-compose.yaml run --rm isaac-lab-template -c \
+      '/.venv/bin/python3 scripts/list_envs.py'
+
+Headless training (GPU required):
+    docker compose -f docker/docker-compose.yaml run --rm isaac-lab-template -c \
+      'cd /workspace/isaaclab_extension_template && /.venv/bin/python3 scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0 --headless --max_iterations 10'
+
+Interactive shell:
+    docker compose -f docker/docker-compose.yaml run --rm isaac-lab-template
+
+Clean up docker disk space:
+    docker system prune -a --volumes
+    docker builder prune -a
+
+Run app selector:
+    cd ~/isaacsim
+    ./isaac-sim.selector.sh
+
+Helper setup (inside docker, from project root):
+    pip install -e . --ignore-requires-python
+
+Train with explicit Omniverse/NVIDIA EULA acceptance:
+    OMNI_KIT_ACCEPT_EULA=Y ACCEPT_EULA=Y UV_PROJECT_ENVIRONMENT=.venv \
+    uv run ./scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0 --headless --max_iterations 1
+
+Valid task IDs:
+    Velocity-Berkeley-Humanoid-Lite-v0
+    Velocity-Berkeley-Humanoid-Lite-Biped-v0

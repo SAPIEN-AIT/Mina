@@ -15,13 +15,13 @@ maintainers = [
     { name = "-T.K.-" },
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 keywords = ["robotics", "isaaclab"]
 classifiers = [
     "Natural Language :: English",
-    "Programming Language :: Python :: 3.10",
-    "Isaac Sim :: 4.5.0",
+    "Programming Language :: Python :: 3.11",
+    "Isaac Sim :: 5.1.0",
 ]
 dependencies = [
     "psutil",
@@ -33,6 +33,3 @@ repository = "https://github.com/HybridRobotics/Berkeley-Humanoid-Lite"
 [tool.setuptools]
 packages = ["berkeley_humanoid_lite"]
 zip-safe = false 
-
-[tool.uv.extra-build-dependencies]
-flatdict = ["pkg_resources"]
