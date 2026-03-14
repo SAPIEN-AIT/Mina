@@ -1,0 +1,150 @@
+# ============================================================
+# docker-compose.yaml — Mina project container fleet
+# Usage: docker compose --profile <profile> up
+# Profiles: dev | training | streaming | synthdata
+# ============================================================
+
+x-isaac-cache-volumes: &isaac-cache-volumes
+  - ${CACHE_KIT:-~/docker/isaac-sim/cache/kit}:/isaac-sim/kit/cache:rw
+  - ${CACHE_OV:-~/docker/isaac-sim/cache/ov}:/root/.cache/ov:rw
+  - ${CACHE_PIP:-~/docker/isaac-sim/cache/pip}:/root/.cache/pip:rw
+  - ${CACHE_GLCACHE:-~/docker/isaac-sim/cache/glcache}:/root/.cache/nvidia/GLCache:rw
+  - ${CACHE_COMPUTECACHE:-~/docker/isaac-sim/cache/computecache}:/root/.nv/ComputeCache:rw
+  - ${LOGS_DIR:-~/docker/isaac-sim/logs}:/root/.nvidia-omniverse/logs:rw
+  - ${DATA_DIR:-~/docker/isaac-sim/data}:/root/.local/share/ov/data:rw
+
+x-isaac-common: &isaac-common
+  runtime: nvidia
+  network_mode: host
+  environment:
+    - ACCEPT_EULA=Y
+    - PRIVACY_CONSENT=Y
+  ipc: host
+
+services:
+
+  # ── mina-isaaclab-base ─────────────────────────────────────
+  # Dev container — live code sync via bind-mount
+  # docker compose --profile dev up mina-isaaclab-base
+  mina-isaaclab-base:
+    profiles: [dev]
+    image: mina-isaaclab-base:latest
+    build:
+      context: ..
+      dockerfile: docker_mina/Dockerfile.base
+    container_name: mina-isaaclab-base
+    <<: *isaac-common
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - HEADLESS=0
+    volumes:
+      - ${MINA_ROOT}/source:/workspace/source:rw          # live-sync your tasks
+      - ${MINA_ROOT}/scripts:/workspace/scripts:rw        # live-sync scripts
+      - ${MINA_ROOT}/configs:/workspace/configs:rw
+      - ${MINA_ROOT}/logs:/workspace/logs:rw
+      - ${MINA_ROOT}/checkpoints:/workspace/checkpoints:rw
+      - ${ISAACLAB_ROOT}/source:/isaac-lab/source:rw      # live-sync lab itself
+      - ${CACHE_KIT:-~/docker/isaac-sim/cache/kit}:/isaac-sim/kit/cache:rw
+      - ${CACHE_OV:-~/docker/isaac-sim/cache/ov}:/root/.cache/ov:rw
+      - ${CACHE_PIP:-~/docker/isaac-sim/cache/pip}:/root/.cache/pip:rw
+      - ${CACHE_GLCACHE:-~/docker/isaac-sim/cache/glcache}:/root/.cache/nvidia/GLCache:rw
+      - ${CACHE_COMPUTECACHE:-~/docker/isaac-sim/cache/computecache}:/root/.nv/ComputeCache:rw
+      - ${LOGS_DIR:-~/docker/isaac-sim/logs}:/root/.nvidia-omniverse/logs:rw
+      - ${DATA_DIR:-~/docker/isaac-sim/data}:/root/.local/share/ov/data:rw
+    stdin_open: true
+    tty: true
+    command: bash
+
+  # ── mina-bhl-training ──────────────────────────────────────
+  # Headless training — code baked in, logs/checkpoints mounted out
+  # docker compose --profile training up mina-bhl-training
+  mina-bhl-training:
+    profiles: [training]
+    image: mina-bhl-training:latest
+    build:
+      context: ..
+      dockerfile: docker_mina/Dockerfile.training
+    container_name: mina-bhl-training
+    <<: *isaac-common
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - HEADLESS=1
+      - ENABLE_CAMERAS=0
+      - TASK=${TASK:-Velocity-Berkeley-Humanoid-Lite-Biped-v0}
+      - NUM_ENVS=${NUM_ENVS:-4096}
+    volumes:
+      - ${MINA_ROOT}/logs:/workspace/logs:rw
+      - ${MINA_ROOT}/checkpoints:/workspace/checkpoints:rw
+      - ${CACHE_KIT:-~/docker/isaac-sim/cache/kit}:/isaac-sim/kit/cache:rw
+      - ${CACHE_OV:-~/docker/isaac-sim/cache/ov}:/root/.cache/ov:rw
+      - ${CACHE_PIP:-~/docker/isaac-sim/cache/pip}:/root/.cache/pip:rw
+      - ${CACHE_GLCACHE:-~/docker/isaac-sim/cache/glcache}:/root/.cache/nvidia/GLCache:rw
+      - ${CACHE_COMPUTECACHE:-~/docker/isaac-sim/cache/computecache}:/root/.nv/ComputeCache:rw
+      - ${LOGS_DIR:-~/docker/isaac-sim/logs}:/root/.nvidia-omniverse/logs:rw
+      - ${DATA_DIR:-~/docker/isaac-sim/data}:/root/.local/share/ov/data:rw
+
+  # ── mina-bhl-streaming ─────────────────────────────────────
+  # WebRTC visualization — watch policies live from any browser
+  # docker compose --profile streaming up mina-bhl-streaming
+  mina-bhl-streaming:
+    profiles: [streaming]
+    image: mina-bhl-streaming:latest
+    build:
+      context: ..
+      dockerfile: docker_mina/Dockerfile.streaming
+    container_name: mina-bhl-streaming
+    <<: *isaac-common
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - HEADLESS=0
+      - LIVESTREAM=2
+      - ENABLE_CAMERAS=1
+      - PUBLIC_IP=${PUBLIC_IP:-127.0.0.1}
+      - TASK=${TASK:-Velocity-Berkeley-Humanoid-Lite-Biped-v0}
+      - NUM_ENVS=${NUM_ENVS:-16}
+      - CHECKPOINT=${CHECKPOINT:-/workspace/checkpoints/model.pt}
+    ports:
+      - "47995-48012:47995-48012/udp"
+      - "49000-49007:49000-49007/udp"
+      - "49100:49100/tcp"
+      - "8211:8211/tcp"
+    volumes:
+      - ${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro
+      - ${CACHE_KIT:-~/docker/isaac-sim/cache/kit}:/isaac-sim/kit/cache:rw
+      - ${CACHE_OV:-~/docker/isaac-sim/cache/ov}:/root/.cache/ov:rw
+      - ${CACHE_PIP:-~/docker/isaac-sim/cache/pip}:/root/.cache/pip:rw
+      - ${CACHE_GLCACHE:-~/docker/isaac-sim/cache/glcache}:/root/.cache/nvidia/GLCache:rw
+      - ${CACHE_COMPUTECACHE:-~/docker/isaac-sim/cache/computecache}:/root/.nv/ComputeCache:rw
+      - ${LOGS_DIR:-~/docker/isaac-sim/logs}:/root/.nvidia-omniverse/logs:rw
+      - ${DATA_DIR:-~/docker/isaac-sim/data}:/root/.local/share/ov/data:rw
+
+  # ── mina-isaacsim-synthdata ────────────────────────────────
+  # Synthetic data generation — pure Isaac Sim, no Lab overhead
+  # docker compose --profile synthdata up mina-isaacsim-synthdata
+  mina-isaacsim-synthdata:
+    profiles: [synthdata]
+    image: mina-isaacsim-synthdata:latest
+    build:
+      context: ..
+      dockerfile: docker_mina/Dockerfile.synthdata
+    container_name: mina-isaacsim-synthdata
+    <<: *isaac-common
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - HEADLESS=1
+      - ENABLE_CAMERAS=1
+      - NUM_SCENES=${NUM_SCENES:-1000}
+    volumes:
+      - ${MINA_ROOT}/data_gen:/workspace/data_gen:rw
+      - ${MINA_ROOT}/outputs:/output:rw
+      - ${CACHE_KIT:-~/docker/isaac-sim/cache/kit}:/isaac-sim/kit/cache:rw
+      - ${CACHE_OV:-~/docker/isaac-sim/cache/ov}:/root/.cache/ov:rw
+      - ${CACHE_PIP:-~/docker/isaac-sim/cache/pip}:/root/.cache/pip:rw
+      - ${CACHE_GLCACHE:-~/docker/isaac-sim/cache/glcache}:/root/.cache/nvidia/GLCache:rw
+      - ${CACHE_COMPUTECACHE:-~/docker/isaac-sim/cache/computecache}:/root/.nv/ComputeCache:rw
+      - ${LOGS_DIR:-~/docker/isaac-sim/logs}:/root/.nvidia-omniverse/logs:rw
+      - ${DATA_DIR:-~/docker/isaac-sim/data}:/root/.local/share/ov/data:rw

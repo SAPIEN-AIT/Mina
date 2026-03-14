@@ -37,7 +37,7 @@ chmod +x deploy_all.sh
 sudo ./deploy_all.sh
 ```
 
-`deploy_all.sh` must be run with `sudo`. It launches the `isaac-sim` container and registers the local Berkeley packages into the container's Python environment.
+`deploy_all.sh` must be run with `sudo`. It launches the `isaac-lab` container and registers the local Berkeley packages into the container's Python environment.
 
 ## Troubleshooting
 
@@ -65,7 +65,7 @@ This often resets GPU runtime detection and resolves the issue.
 ### Option A: Run from the Host (Recommended)
 
 ```bash
-docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0'
+docker exec -u root -it isaac-lab bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0'
 ```
 
 ### Option B: Run from Inside the Container
@@ -73,7 +73,7 @@ docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standal
 Step 1. Enter the container as `root`:
 
 ```bash
-docker exec -u root -it isaac-sim bash
+docker exec -u root -it isaac-lab bash
 ```
 
 Step 2. Run from the project directory using the Isaac Lab wrapper:
@@ -91,7 +91,7 @@ Playback uses the same pattern:
 
 ## 📂 File Structure
 
-* **`deploy_all.sh`**: The master setup script. It safely handles `sudo` permissions, installs the NVIDIA Container Toolkit if missing, creates your local cache folders in `~/docker/isaac-sim/`, writes the `.env.base` file, and starts the container.
+* **`deploy_all.sh`**: The master setup script. It safely handles `sudo` permissions, installs the NVIDIA Container Toolkit if missing, creates your local cache folders in `~/docker/isaac-sim/` (cache dir, separate from container name), writes the `.env.base` file, and starts the container.
 * **`docker-compose.yaml`**: The blueprint that configures the container, passes through the physical GPUs, and maps your local repository to `/workspace`.
 * **`Dockerfile`**: Fetches the base NVIDIA Isaac Sim image.
 * **`.env.base`**: *(Auto-generated)* Stores your specific User ID, Group ID, and cache directory paths to prevent permission errors.

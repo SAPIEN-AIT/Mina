@@ -1,0 +1,29 @@
+# ============================================================
+# mina-bhl-training
+# Purpose: headless RL training — bakes in berkeley_humanoid_lite
+# Base: mina-isaaclab-base
+# ============================================================
+FROM mina-isaaclab-base:latest
+
+# Copy and install all source packages
+COPY source/ /workspace/source/
+RUN cd /workspace/source/berkeley_humanoid_lite_assets && \
+    /isaac-sim/python.sh -m pip install -e . --no-cache-dir && \
+    cd /workspace/source/berkeley_humanoid_lite && \
+    /isaac-sim/python.sh -m pip install -e . --no-cache-dir
+    
+# Copy training scripts
+COPY scripts/ /workspace/scripts/
+COPY configs/ /workspace/configs/
+
+# Training env defaults
+ENV HEADLESS=1
+ENV ENABLE_CAMERAS=0
+
+WORKDIR /workspace
+
+CMD ["bash", "-c", \
+     "isaaclab -p scripts/rsl_rl/train.py \
+      --task ${TASK:-Velocity-Berkeley-Humanoid-Lite-Biped-v0} \
+      --num_envs ${NUM_ENVS:-4096} \
+      --headless"]

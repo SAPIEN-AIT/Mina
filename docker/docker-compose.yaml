@@ -1,6 +1,6 @@
 services:
-  isaac-sim:
-    container_name: isaac-sim
+  isaac-lab:
+    container_name: isaac-lab
     image: nvcr.io/nvidia/isaac-lab:${ISAAC_LAB_VERSION}
     entrypoint: bash
     stdin_open: true 

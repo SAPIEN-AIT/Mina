@@ -1,7 +1,7 @@
 # 1. KILL THE CONTAINER
-# Stop and remove the Isaac Sim/Lab container if it exists
-docker stop isaac-sim || true
-docker rm isaac-sim || true
+# Stop and remove the Isaac Lab container if it exists
+docker stop isaac-lab || true
+docker rm isaac-lab || true
 
 # 2. BURN THE BLUEPRINTS
 # Delete the auto-generated env file in your docker folder

@@ -37,7 +37,7 @@ The latest release of CAD model and 3D print files can be accessed from the [Rel
 ### Docker Deployment
 
 The finalized Docker workflow is driven by `docker/deploy_all.sh`.
-This script must be run with `sudo` on the host machine because it installs Docker/NVIDIA plumbing when needed, launches the `isaac-sim` container, and registers the local Berkeley packages into the container as the `root` user.
+This script must be run with `sudo` on the host machine because it installs Docker/NVIDIA plumbing when needed, launches the `isaac-lab` container, and registers the local Berkeley packages into the container as the `root` user.
 
 ```bash
 cd docker
@@ -59,7 +59,7 @@ sudo ./deploy_all.sh
 ### Option A: Run Training Directly from the Host (Recommended)
 
 ```bash
-docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0'
+docker exec -u root -it isaac-lab bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0'
 ```
 
 ### Option B: Run from Inside the Container
@@ -67,7 +67,7 @@ docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standal
 Step 1. Enter the container as `root`:
 
 ```bash
-docker exec -u root -it isaac-sim bash
+docker exec -u root -it isaac-lab bash
 ```
 
 Step 2. Navigate to the project and run training with the Isaac Lab wrapper:
@@ -80,7 +80,7 @@ cd /workspace/isaaclab/source/standalone/mina_project
 ### Playback
 
 ```bash
-docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-v0'
+docker exec -u root -it isaac-lab bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-v0'
 ```
 
 ## Project Overview (Isaac Lab + RSL-RL)

@@ -4,7 +4,7 @@ set -e
 # 1. CONFIGURATION
 # ==========================================
 ISAAC_LAB_VERSION="2.3.2"
-CONTAINER_NAME="isaac-sim"
+CONTAINER_NAME="isaac-lab"
 PROJECT_DIR="/workspace/isaaclab/source/standalone/mina_project"
 
 # REVERSED ORDER: Install sub-modules first, then the main workspace

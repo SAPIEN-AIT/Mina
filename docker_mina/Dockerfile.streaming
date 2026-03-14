@@ -1,0 +1,30 @@
+# ============================================================
+# mina-bhl-streaming
+# Purpose: WebRTC livestream — visualize policies remotely
+# Base: mina-bhl-training (already has your package installed)
+# ============================================================
+FROM mina-bhl-training:latest
+
+# WebRTC streaming ports
+# 47995-48012 UDP: WebRTC media streams
+# 49000-49007 UDP: signaling
+# 49100     TCP: WebSocket signaling
+EXPOSE 47995-48012/udp
+EXPOSE 49000-49007/udp
+EXPOSE 49100/tcp
+EXPOSE 8211/tcp
+
+# Override: streaming, not headless
+ENV HEADLESS=0
+ENV LIVESTREAM=2
+ENV ENABLE_CAMERAS=1
+# Set PUBLIC_IP at runtime: -e PUBLIC_IP=x.x.x.x
+
+WORKDIR /workspace
+
+# Default: run play script with streaming — override CMD at runtime
+CMD ["bash", "-c", \
+     "isaaclab -p scripts/rsl_rl/play.py \
+      --task ${TASK:-Velocity-Berkeley-Humanoid-Lite-Biped-v0} \
+      --num_envs ${NUM_ENVS:-16} \
+      --checkpoint ${CHECKPOINT:-/workspace/checkpoints/model.pt}"]

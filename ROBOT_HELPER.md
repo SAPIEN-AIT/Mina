@@ -12,7 +12,7 @@ chmod +x deploy_all.sh
 sudo ./deploy_all.sh
 ```
 
-This starts the `isaac-sim` container and registers the local Berkeley packages inside the container as `root`.
+This starts the `isaac-lab` container and registers the local Berkeley packages inside the container as `root`.
 
 ## Critical Rules
 
@@ -29,19 +29,19 @@ This starts the `isaac-sim` container and registers the local Berkeley packages 
 1. Train full humanoid from the host:
 
 ```bash
-docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0'
+docker exec -u root -it isaac-lab bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0'
 ```
 
 2. Train biped variant from the host:
 
 ```bash
-docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-Biped-v0'
+docker exec -u root -it isaac-lab bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-Biped-v0'
 ```
 
 3. Train from inside the container:
 
 ```bash
-docker exec -u root -it isaac-sim bash
+docker exec -u root -it isaac-lab bash
 cd /workspace/isaaclab/source/standalone/mina_project
 /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py --task Velocity-Berkeley-Humanoid-Lite-v0
 ```
@@ -49,7 +49,7 @@ cd /workspace/isaaclab/source/standalone/mina_project
 ## Playback
 
 ```bash
-docker exec -u root -it isaac-sim bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-v0'
+docker exec -u root -it isaac-lab bash -c 'cd /workspace/isaaclab/source/standalone/mina_project && /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-v0'
 ```
 
 ## Troubleshooting Tips

@@ -1,0 +1,29 @@
+# ============================================================
+# mina-isaaclab-base
+# Isaac Lab 2.3.x on top of Isaac Sim 4.5.0
+# Purpose: development base — all other images build FROM this
+# ============================================================
+FROM nvcr.io/nvidia/isaac-lab:2.3.2
+
+# Accept EULA non-interactively
+ENV ACCEPT_EULA=Y
+ENV PRIVACY_CONSENT=Y
+
+# Install any extra system deps your project needs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    wget \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make isaaclab CLI available on PATH
+ENV ISAACLAB_PATH=/workspace/isaaclab
+RUN printf '#!/usr/bin/env bash\nexec /workspace/isaaclab/isaaclab.sh "$@"\n' > /usr/local/bin/isaaclab \
+    && chmod +x /usr/local/bin/isaaclab
+
+# Set working directory
+WORKDIR /workspace
+
+# Default: drop into bash
+ENTRYPOINT []
+CMD ["/bin/bash"]

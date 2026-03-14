@@ -1,0 +1,24 @@
+# ============================================================
+# mina-bhl-deploy
+# Purpose: real-robot policy inference — NO Isaac Sim
+# Runs on Jetson Orin / any compute unit
+# ============================================================
+FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir numpy
+
+# Copy only the inference code and checkpoint
+#COPY deploy/ /workspace/deploy/
+
+# Checkpoint is baked in at build time for reproducibility.
+# Override at runtime with: -v /path/to/model.pt:/workspace/model.pt
+#COPY checkpoints/model_final.pt /workspace/model.pt
+
+WORKDIR /workspace
+
+#CMD ["python", "deploy/run_policy.py", "--checkpoint", "/workspace/model.pt"]
+CMD ["bash"]

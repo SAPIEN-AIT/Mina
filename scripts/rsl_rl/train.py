@@ -105,17 +105,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
 
-    # Write Isaac Lab internal logs to the project folder to avoid /tmp permission issues.
-    isaaclab_log_dir = os.path.join(log_root_path, "isaaclab")
-    os.makedirs(isaaclab_log_dir, exist_ok=True)
-    if hasattr(env_cfg.sim, "log_dir"):
-        env_cfg.sim.log_dir = isaaclab_log_dir
-
     # specify directory for logging runs: {time-stamp}_{run_name}
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if agent_cfg.run_name:
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
+
+    # Write Isaac Lab internal logs inside the run directory to avoid polluting the root.
+    isaaclab_log_dir = os.path.join(log_dir, "isaaclab")
+    os.makedirs(isaaclab_log_dir, exist_ok=True)
+    if hasattr(env_cfg.sim, "log_dir"):
+        env_cfg.sim.log_dir = isaaclab_log_dir
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
