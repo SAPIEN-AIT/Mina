@@ -75,6 +75,12 @@ RUN
   ./docker/run.sh synthdata [n]      Generate synthetic data (num scenes)
   ./docker/run.sh eval [task] [ckpt] Headless evaluation with video
 
+APPTAINER (local Singularity testing)
+  ./docker/run.sh apptainer-build [profile]   Convert Docker image to Apptainer sandbox
+  ./docker/run.sh apptainer-shell [profile]   Interactive shell in Apptainer sandbox
+  ./docker/run.sh apptainer-train [task] [n]  Headless training via Apptainer
+  ./docker/run.sh apptainer-clean [profile]   Remove local Apptainer sandbox
+
 UTILS
   ./docker/run.sh list               List all mina containers + images
   ./docker/run.sh stop               Stop all running mina containers
@@ -269,6 +275,95 @@ cmd_eval() {
             --video_interval 1
 }
 
+# ── Apptainer (local Singularity testing) ─────────────────────
+APPTAINER_DIR="/tmp"
+
+apptainer_bind_args() {
+    local cache_base="${HOME}/docker/isaac-sim"
+    mkdir -p \
+        "$cache_base/cache/kit" "$cache_base/cache/ov" "$cache_base/cache/pip" \
+        "$cache_base/cache/glcache" "$cache_base/cache/computecache" \
+        "$cache_base/logs" "$cache_base/data"
+    echo "-B $cache_base/cache/kit:/isaac-sim/kit/cache:rw \
+          -B $cache_base/cache/ov:/root/.cache/ov:rw \
+          -B $cache_base/cache/pip:/root/.cache/pip:rw \
+          -B $cache_base/cache/glcache:/root/.cache/nvidia/GLCache:rw \
+          -B $cache_base/cache/computecache:/root/.nv/ComputeCache:rw \
+          -B $cache_base/logs:/root/.nvidia-omniverse/logs:rw \
+          -B $cache_base/data:/root/.local/share/ov/data:rw"
+}
+
+cmd_apptainer_build() {
+    local profile="${1:-mina-bhl-training}"
+    local sif_path="$APPTAINER_DIR/${profile}.sif"
+    local tar_path="$APPTAINER_DIR/${profile}-docker.tar"
+
+    if [ -d "$sif_path" ]; then
+        echo "[INFO] Sandbox already exists at $sif_path — delete it first with: $0 apptainer-clean $profile"
+        return 0
+    fi
+
+    echo "==> Converting Docker image '$profile:latest' to Apptainer sandbox ..."
+    docker save "$profile:latest" -o "$tar_path"
+    apptainer build --sandbox "$sif_path" "docker-archive://$tar_path"
+    rm -f "$tar_path"
+    # Create bind-mount targets that may not exist in the image
+    mkdir -p "$sif_path/workspace/logs" "$sif_path/workspace/checkpoints"
+    echo "==> Sandbox ready at $sif_path ($(du -sh "$sif_path" | cut -f1))"
+}
+
+cmd_apptainer_shell() {
+    local profile="${1:-mina-bhl-training}"
+    local sif_path="$APPTAINER_DIR/${profile}.sif"
+    if [ ! -d "$sif_path" ]; then
+        echo "[Error] No sandbox at $sif_path. Run: $0 apptainer-build $profile" >&2
+        exit 1
+    fi
+    echo "==> Opening shell in $sif_path ..."
+    apptainer shell \
+        $(apptainer_bind_args) \
+        --nv --writable --containall "$sif_path"
+}
+
+cmd_apptainer_train() {
+    local profile="mina-bhl-training"
+    local task="${1:-$TASK}"
+    local num_envs="${2:-$NUM_ENVS}"
+    local sif_path="$APPTAINER_DIR/${profile}.sif"
+
+    if [ ! -d "$sif_path" ]; then
+        echo "[Error] No sandbox at $sif_path. Run: $0 apptainer-build" >&2
+        exit 1
+    fi
+
+    echo "==> Apptainer training: task=$task num_envs=$num_envs ..."
+    apptainer exec \
+        $(apptainer_bind_args) \
+        -B "${MINA_ROOT}/logs:/workspace/logs:rw" \
+        -B "${MINA_ROOT}/checkpoints:/workspace/checkpoints:rw" \
+        --nv --writable --containall "$sif_path" \
+        bash -c "export ISAACLAB_PATH=/workspace/isaaclab && \
+                 export HEADLESS=1 && \
+                 export ENABLE_CAMERAS=0 && \
+                 cd /workspace && \
+                 /workspace/isaaclab/isaaclab.sh -p scripts/rsl_rl/train.py \
+                   --task $task \
+                   --num_envs $num_envs \
+                   --headless"
+}
+
+cmd_apptainer_clean() {
+    local profile="${1:-mina-bhl-training}"
+    local sif_path="$APPTAINER_DIR/${profile}.sif"
+    if [ -d "$sif_path" ]; then
+        echo "==> Removing $sif_path ..."
+        rm -rf "$sif_path"
+        echo "Done."
+    else
+        echo "[INFO] No sandbox at $sif_path"
+    fi
+}
+
 # ── Utils ─────────────────────────────────────────────────────
 cmd_list() {
     echo "==> Mina images:"
@@ -305,6 +400,10 @@ case "${1:-help}" in
     stream)         shift; cmd_stream "$@" ;;
     synthdata)      shift; cmd_synthdata "$@" ;;
     eval)           shift; cmd_eval "$@" ;;
+    apptainer-build)  shift; cmd_apptainer_build "$@" ;;
+    apptainer-shell)  shift; cmd_apptainer_shell "$@" ;;
+    apptainer-train)  shift; cmd_apptainer_train "$@" ;;
+    apptainer-clean)  shift; cmd_apptainer_clean "$@" ;;
     list)           cmd_list ;;
     stop)           cmd_stop ;;
     clean)          cmd_clean ;;
