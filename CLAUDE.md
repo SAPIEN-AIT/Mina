@@ -33,11 +33,10 @@ Mina/
 │   ├── run.sh                       # CLI dispatcher: dev, train, stream, eval, etc.
 │   ├── docker-compose.yaml          # Service definitions
 │   ├── .env                         # NGC key, paths, default task/num_envs
-│   ├── Dockerfile.{base,training,streaming,synthdata,deploy}
+│   ├── Dockerfile.{base,training}
 │   ├── cluster/                     # HPC/SLURM: Singularity conversion, job submission
 │   ├── mina_docker_usage.md         # What to run and when
 │   └── mina_docker_reference.md     # How everything is wired (deep technical reference)
-├── docker/                          # Legacy Docker workflow (deploy_all.sh)
 ├── learnings/                       # Accumulated troubleshooting notes
 ├── ros_workspaces/                  # ROS2 integration
 ├── pyproject.toml                   # uv workspace config, all dependencies
@@ -75,20 +74,15 @@ Default task in `.env`: `Velocity-Berkeley-Humanoid-Lite-Biped-v0`
 
 ## Docker Architecture
 
-### Five containers (image hierarchy)
+### Two containers (image hierarchy)
 
 ```
 nvidia/isaac-lab:2.3.2
   └── mina-isaaclab-base        (dev: live code sync, manual pip install)
-        └── mina-bhl-training   (headless: code baked in, reproducible)
-              └── mina-bhl-streaming  (adds WebRTC ports, LIVESTREAM=2)
-
-nvidia/isaac-sim:4.5.0
-  └── mina-isaacsim-synthdata   (camera data gen, no RL stack)
-
-pytorch/pytorch:2.3.0-cuda12.1
-  └── mina-bhl-deploy           (lightweight: no Isaac Sim, for Jetson/edge)
+        └── mina-bhl-training   (headless training, streaming, eval — code baked in)
 ```
+
+Streaming reuses `mina-bhl-training` with runtime flag overrides. ROS2 inference uses `mina_desktop:jazzy`.
 
 ### Common commands (all from project root)
 
@@ -109,7 +103,10 @@ pytorch/pytorch:2.3.0-cuda12.1
 ./docker_mina/run.sh eval [task] [checkpoint]
 
 # Rebuild after code changes
-./docker_mina/run.sh build-training   # then build-streaming if needed
+./docker_mina/run.sh build-training
+
+# ROS2 policy inference
+./docker_mina/run.sh ros-policy [config]
 ```
 
 ### Critical Docker rules
@@ -122,7 +119,7 @@ pytorch/pytorch:2.3.0-cuda12.1
 3. **Use `isaaclab -p` wrapper**, never plain `python3`, for Isaac Lab tasks
 4. **`ENABLE_CAMERAS=1`** required for any video recording
 5. **Browser WebRTC streaming is broken** in this Isaac Lab version — use the native Streaming Client
-6. **Rebuild order matters:** base → training → streaming
+6. **Rebuild order matters:** base → training
 7. **`network_mode: host`** — two containers binding same ports will conflict
 8. **Container runs as root** — files in logs/ will be root-owned on host
 
@@ -159,7 +156,6 @@ pytorch/pytorch:2.3.0-cuda12.1
 | Play videos | `logs/rsl_rl/<experiment>/<timestamp>/videos/play/` |
 | Exported policies | `logs/rsl_rl/<experiment>/<timestamp>/exported/policy.{pt,onnx}` |
 | Deploy config | `configs/policy_latest.yaml` |
-| Eval/synthdata | `outputs/` |
 | Isaac Sim cache | `~/docker/isaac-sim/cache/` |
 
 ## Deployment Pipeline
