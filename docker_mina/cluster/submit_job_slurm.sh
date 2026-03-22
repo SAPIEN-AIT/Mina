@@ -30,5 +30,8 @@ mkdir -p "\$SINGULARITY_TMPDIR" "\$SINGULARITY_CACHEDIR"
 bash "$1/docker_mina/cluster/run_singularity.sh" "$1" "$2" "${@:3}"
 EOT
 
-sbatch < job.sh
+# Write slurm output to permanent logs dir so it survives REMOVE_CODE_COPY_AFTER_JOB=true
+source "$(dirname "${BASH_SOURCE[0]}")/.env.cluster"
+mkdir -p "$CLUSTER_ISAACLAB_DIR/logs/slurm"
+sbatch --output="$CLUSTER_ISAACLAB_DIR/logs/slurm/slurm-%j.out" < job.sh
 rm job.sh

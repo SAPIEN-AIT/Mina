@@ -9,6 +9,8 @@ class BerkeleyHumanoidLiteBipedPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 100
     experiment_name = "biped"
     empirical_normalization = False
+    logger = "wandb"
+    wandb_project = "mina"
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
         actor_hidden_dims = [256, 128, 128],

@@ -92,6 +92,8 @@ singularity exec \
     -B $TMPDIR/$dir_name/scripts:/workspace/scripts:rw \
     -B $TMPDIR/$dir_name/configs:/workspace/configs:rw \
     -B $CLUSTER_ISAACLAB_DIR/logs:/workspace/logs:rw \
+    ${WANDB_API_KEY:+--env WANDB_API_KEY="${WANDB_API_KEY}"} \
+    ${WANDB_USERNAME:+--env WANDB_USERNAME="${WANDB_USERNAME}"} \
     --nv --writable --containall $TMPDIR/$2.sif \
     bash -c "export ISAACLAB_PATH=/workspace/isaaclab && cd /workspace && /isaac-sim/python.sh ${CLUSTER_PYTHON_EXECUTABLE} ${@:3}"
 

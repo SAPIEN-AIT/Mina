@@ -93,3 +93,38 @@ def track_ang_vel_z_world_exp(
     asset = env.scene[asset_cfg.name]
     ang_vel_error = torch.square(env.command_manager.get_command(command_name)[:, 2] - asset.data.root_ang_vel_w[:, 2])
     return torch.exp(-ang_vel_error / std**2)
+
+
+def stand_still_penalty(
+    env, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"), threshold: float = 0.1
+) -> torch.Tensor:
+    """Penalize base linear velocity when the velocity command is near zero."""
+    asset = env.scene[asset_cfg.name]
+    cmd = env.command_manager.get_command(command_name)
+    cmd_norm = torch.norm(cmd[:, :2], dim=1)
+    vel_norm = torch.norm(asset.data.root_lin_vel_w[:, :2], dim=1)
+    penalty = vel_norm * (cmd_norm < threshold).float()
+    return penalty
+
+
+def stand_default_pose(
+    env,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    threshold: float = 0.1,
+    vel_threshold: float = 0.15,
+) -> torch.Tensor:
+    """Reward default joint pose when standing still with near-zero velocity."""
+    asset = env.scene[asset_cfg.name]
+    cmd = env.command_manager.get_command(command_name)
+    cmd_norm = torch.norm(cmd[:, :2], dim=1)
+    vel_norm = torch.norm(asset.data.root_lin_vel_w[:, :2], dim=1)
+    joint_deviation = torch.sum(
+        torch.square(
+            asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+        ),
+        dim=1,
+    )
+    is_standing = (cmd_norm < threshold) & (vel_norm < vel_threshold)
+    reward = torch.exp(-joint_deviation) * is_standing.float()
+    return reward

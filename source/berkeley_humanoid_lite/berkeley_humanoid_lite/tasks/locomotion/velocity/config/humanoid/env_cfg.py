@@ -23,12 +23,12 @@ class CommandsCfg:
     """Command specifications for the MDP."""
 
     base_velocity = mdp.UniformVelocityCommandCfg(
-        resampling_time_range=(10.0, 10.0),
+        resampling_time_range=(3.0, 8.0),
         debug_vis=True,
         asset_name="robot",
         heading_command=True,
         heading_control_stiffness=0.5,
-        rel_standing_envs=0.02,
+        rel_standing_envs=0.15,
         rel_heading_envs=1.0,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
             lin_vel_x=(-1.0, 1.0),
@@ -213,6 +213,21 @@ class RewardsCfg:
         weight=-1.0,
     )
 
+    # === Reward for standing still ===
+    stand_still = RewTerm(
+        func=mdp.stand_still_penalty,
+        params={"command_name": "base_velocity"},
+        weight=-1.5,
+    )
+    stand_pose = RewTerm(
+        func=mdp.stand_default_pose,
+        params={
+            "command_name": "base_velocity",
+            "asset_cfg": SceneEntityCfg("robot", joint_names=HUMANOID_LITE_JOINTS, preserve_order=True),
+        },
+        weight=1.0,
+    )
+
 
 @configclass
 class TerminationsCfg:
@@ -308,12 +323,12 @@ class EventsCfg:
     )
 
     # === Interval behaviors ===
-    # push_robot = EventTerm(
-    #     func=mdp.push_by_setting_velocity,
-    #     params={"velocity_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0)}},
-    #     mode="interval",
-    #     interval_range_s=(10.0, 15.0),
-    # )
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        params={"velocity_range": {"x": (-0.8, 0.8), "y": (-0.8, 0.8)}},
+        mode="interval",
+        interval_range_s=(8.0, 12.0),
+    )
 
 
 @configclass

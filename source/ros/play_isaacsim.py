@@ -83,24 +83,31 @@ class HumanoidPolicyNode(Node):
         # Tick counter for periodic logging
         self._tick = 0
 
-        # QoS
-        sim_qos = rclpy.qos.QoSProfile(
+        # QoS — sensor subscriptions: BEST_EFFORT so we drop stale messages
+        sensor_qos = rclpy.qos.QoSProfile(
+            reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,
+            durability=rclpy.qos.DurabilityPolicy.VOLATILE,
+            history=rclpy.qos.HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        # QoS — command publisher: RELIABLE to match Isaac Sim's subscriber
+        cmd_qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
             durability=rclpy.qos.DurabilityPolicy.VOLATILE,
-            history=rclpy.qos.HistoryPolicy.KEEP_ALL,
+            history=rclpy.qos.HistoryPolicy.KEEP_LAST,
+            depth=1,
         )
 
         # Subscriptions
         self.create_subscription(Twist, args.cmd_vel_topic,
                                  self._cmd_vel_callback, 10)
         self.create_subscription(JointState, args.joint_states_topic,
-                                 self._joint_states_callback, sim_qos)
+                                 self._joint_states_callback, sensor_qos)
         self.create_subscription(Imu, args.imu_topic,
-                                 self._imu_callback, sim_qos)
-                                 
+                                 self._imu_callback, sensor_qos)
 
         # Publisher
-        self._pub = self.create_publisher(JointState, args.joint_command_topic, sim_qos)
+        self._pub = self.create_publisher(JointState, args.joint_command_topic, cmd_qos)
 
         # Single timer at 25 Hz — matches MuJoCo's policy loop
         self.create_timer(cfg.policy_dt, self._policy_callback)

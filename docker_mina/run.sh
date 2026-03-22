@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 # run.sh — Mina container command centre
-# Usage: ./docker/run.sh <command> [options]
+# Usage: ./docker_mina/run.sh <command> [options]
 # ============================================================
 set -euo pipefail
 
@@ -41,8 +41,7 @@ mkdir -p \
     "${HOME}/docker/isaac-sim/logs" \
     "${HOME}/docker/isaac-sim/data" \
     "${MINA_ROOT}/logs" \
-    "${MINA_ROOT}/checkpoints" \
-    "${MINA_ROOT}/outputs"
+    "${MINA_ROOT}/checkpoints"
 
 # ── NGC login check ──────────────────────────────────────────
 ngc_login() {
@@ -57,34 +56,35 @@ print_help() {
 Mina container command centre
 
 SETUP
-  ./docker/run.sh ngc-login          Authenticate with NGC (required once)
-  ./docker/run.sh pull-base          Pull base images from NGC
+  ./docker_mina/run.sh ngc-login          Authenticate with NGC (required once)
+  ./docker_mina/run.sh pull-base          Pull base images from NGC
 
 BUILD (run once, then after code changes)
-  ./docker/run.sh build-base         Build mina-isaaclab-base
-  ./docker/run.sh build-training     Build mina-bhl-training
-  ./docker/run.sh build-streaming    Build mina-bhl-streaming
-  ./docker/run.sh build-synthdata    Build mina-isaacsim-synthdata
-  ./docker/run.sh build-deploy       Build mina-bhl-deploy
-  ./docker/run.sh build-all          Build all of the above
+  ./docker_mina/run.sh build-base         Build mina-isaaclab-base
+  ./docker_mina/run.sh build-training     Build mina-bhl-training
+  ./docker_mina/run.sh build-all          Build base + training
 
 RUN
-  ./docker/run.sh dev                Enter dev container (live code sync)
-  ./docker/run.sh train [task] [n]   Headless training (task, num_envs)
-  ./docker/run.sh stream [ckpt]      Livestream policy (checkpoint path)
-  ./docker/run.sh synthdata [n]      Generate synthetic data (num scenes)
-  ./docker/run.sh eval [task] [ckpt] Headless evaluation with video
+  ./docker_mina/run.sh dev                Enter dev container (live code sync)
+  ./docker_mina/run.sh train [task] [n]   Headless training (task, num_envs)
+  ./docker_mina/run.sh stream [ckpt]      Livestream policy (checkpoint path)
+  ./docker_mina/run.sh eval [task] [ckpt] Headless evaluation with video
+
+ROS2 (Jazzy — policy inference + teleop, uses mina_desktop:jazzy)
+  ./docker_mina/run.sh ros-policy [config]         Run ROS2 policy node (default: configs/policy_latest.yaml)
+  ./docker_mina/run.sh ros-gamepad [--verbose]      Run gamepad → /cmd_vel bridge
+  ./docker_mina/run.sh ros-shell                   Interactive shell in ROS2 container
 
 APPTAINER (local Singularity testing)
-  ./docker/run.sh apptainer-build [profile]   Convert Docker image to Apptainer sandbox
-  ./docker/run.sh apptainer-shell [profile]   Interactive shell in Apptainer sandbox
-  ./docker/run.sh apptainer-train [task] [n]  Headless training via Apptainer
-  ./docker/run.sh apptainer-clean [profile]   Remove local Apptainer sandbox
+  ./docker_mina/run.sh apptainer-build [profile]   Convert Docker image to Apptainer sandbox
+  ./docker_mina/run.sh apptainer-shell [profile]   Interactive shell in Apptainer sandbox
+  ./docker_mina/run.sh apptainer-train [task] [n]  Headless training via Apptainer
+  ./docker_mina/run.sh apptainer-clean [profile]   Remove local Apptainer sandbox
 
 UTILS
-  ./docker/run.sh list               List all mina containers + images
-  ./docker/run.sh stop               Stop all running mina containers
-  ./docker/run.sh clean              Remove all mina containers + images
+  ./docker_mina/run.sh list               List all mina containers + images
+  ./docker_mina/run.sh stop               Stop all running mina containers
+  ./docker_mina/run.sh clean              Remove all mina containers + images
 
 EOF
 }
@@ -98,8 +98,6 @@ cmd_ngc_login() {
 cmd_pull_base() {
     echo "==> Pulling nvcr.io/nvidia/isaac-lab:2.3.2 ..."
     docker pull nvcr.io/nvidia/isaac-lab:2.3.2
-    echo "==> Pulling nvcr.io/nvidia/isaac-sim:4.5.0 ..."
-    docker pull nvcr.io/nvidia/isaac-sim:4.5.0
 }
 
 cmd_build_base() {
@@ -118,36 +116,9 @@ cmd_build_training() {
         "$PROJECT_ROOT"
 }
 
-cmd_build_streaming() {
-    echo "==> Building mina-bhl-streaming ..."
-    docker build \
-        -f "$SCRIPT_DIR/Dockerfile.streaming" \
-        -t mina-bhl-streaming:latest \
-        "$PROJECT_ROOT"
-}
-
-cmd_build_synthdata() {
-    echo "==> Building mina-isaacsim-synthdata ..."
-    docker build \
-        -f "$SCRIPT_DIR/Dockerfile.synthdata" \
-        -t mina-isaacsim-synthdata:latest \
-        "$PROJECT_ROOT"
-}
-
-cmd_build_deploy() {
-    echo "==> Building mina-bhl-deploy ..."
-    docker build \
-        -f "$SCRIPT_DIR/Dockerfile.deploy" \
-        -t mina-bhl-deploy:latest \
-        "$PROJECT_ROOT"
-}
-
 cmd_build_all() {
     cmd_build_base
     cmd_build_training
-    cmd_build_streaming
-    cmd_build_synthdata
-    cmd_build_deploy
     echo "==> All images built."
 }
 
@@ -171,8 +142,15 @@ cmd_dev() {
         -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:rw" \
         -v "${ISAACLAB_ROOT}/source:/isaac-lab/source:rw" \
         "${CACHE_VOLS[@]}" \
+        ${WANDB_API_KEY:+-e WANDB_API_KEY="${WANDB_API_KEY}"} \
+        ${WANDB_USERNAME:+-e WANDB_USERNAME="${WANDB_USERNAME}"} \
         mina-isaaclab-base:latest \
-        /bin/bash
+        bash -c "
+            echo '==> Installing berkeley_humanoid_lite_lowlevel ...'
+            /isaac-sim/python.sh -m pip install -q --no-cache-dir -e /workspace/source/berkeley_humanoid_lite_lowlevel
+            echo '==> Done. Entering dev shell.'
+            exec /bin/bash
+        "
 }
 
 # ── mina-bhl-training — headless RL training ─────────────────
@@ -194,15 +172,20 @@ cmd_train() {
         -e NUM_ENVS="$num_envs" \
         -v "${MINA_ROOT}/logs:/workspace/logs:rw" \
         -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:rw" \
+        ${WANDB_API_KEY:+-e WANDB_API_KEY="${WANDB_API_KEY}"} \
+        ${WANDB_USERNAME:+-e WANDB_USERNAME="${WANDB_USERNAME}"} \
         "${CACHE_VOLS[@]}" \
         mina-bhl-training:latest
 }
 
 # ── mina-bhl-streaming — WebRTC visualization ────────────────
 cmd_stream() {
-    local checkpoint="${1:-/workspace/checkpoints/model.pt}"
-    echo "==> Starting mina-bhl-streaming: checkpoint=$checkpoint ..."
-    echo "    Connect via: http://${PUBLIC_IP}:8211/streaming/webrtc-demo/?server=${PUBLIC_IP}"
+    local extra_args=""
+    if [ -n "${1:-}" ]; then
+        extra_args="--checkpoint $1"
+    fi
+    echo "==> Starting streaming (mina-bhl-training + play.py) ..."
+    echo "    Connect via Isaac Sim Streaming Client → ${PUBLIC_IP}"
     docker run \
         --name mina-bhl-streaming \
         --rm -it \
@@ -215,44 +198,26 @@ cmd_stream() {
         -e LIVESTREAM=2 \
         -e ENABLE_CAMERAS=1 \
         -e PUBLIC_IP="$PUBLIC_IP" \
-        -e TASK="$TASK" \
-        -e NUM_ENVS=16 \
-        -e CHECKPOINT="$checkpoint" \
-        -p 47995-48012:47995-48012/udp \
-        -p 49000-49007:49000-49007/udp \
-        -p 49100:49100/tcp \
-        -p 8211:8211/tcp \
+        -e FASTRTPS_DEFAULT_PROFILES_FILE=/workspace/source/ros/fastdds.xml \
+        -v "${MINA_ROOT}/source/ros/fastdds.xml:/workspace/source/ros/fastdds.xml:ro" \
+        -v "${MINA_ROOT}/logs:/workspace/logs:rw" \
         -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
         "${CACHE_VOLS[@]}" \
-        mina-bhl-streaming:latest
-}
-
-# ── mina-isaacsim-synthdata — dataset generation ─────────────
-cmd_synthdata() {
-    local num_scenes="${1:-1000}"
-    echo "==> Starting mina-isaacsim-synthdata: scenes=$num_scenes ..."
-    docker run \
-        --name mina-isaacsim-synthdata \
-        --rm -it \
-        --gpus all \
-        --network host \
-        --ipc host \
-        -e ACCEPT_EULA=Y \
-        -e PRIVACY_CONSENT=Y \
-        -e HEADLESS=1 \
-        -e ENABLE_CAMERAS=1 \
-        -e NUM_SCENES="$num_scenes" \
-        -v "${MINA_ROOT}/data_gen:/workspace/data_gen:rw" \
-        -v "${MINA_ROOT}/outputs:/output:rw" \
-        "${CACHE_VOLS[@]}" \
-        mina-isaacsim-synthdata:latest
+        mina-bhl-training:latest \
+        bash -c "isaaclab -p scripts/rsl_rl/play.py \
+            --task ${TASK} \
+            --num_envs 16 \
+            ${extra_args}"
 }
 
 # ── headless eval with video ──────────────────────────────────
 cmd_eval() {
     local task="${1:-$TASK}"
-    local checkpoint="${2:-/workspace/checkpoints/model.pt}"
-    echo "==> Starting headless eval: task=$task checkpoint=$checkpoint ..."
+    local extra_args=""
+    if [ -n "${2:-}" ]; then
+        extra_args="--checkpoint $2"
+    fi
+    echo "==> Starting headless eval: task=$task ..."
     docker run \
         --name mina-bhl-eval \
         --rm -it \
@@ -263,16 +228,87 @@ cmd_eval() {
         -e PRIVACY_CONSENT=Y \
         -e HEADLESS=1 \
         -e ENABLE_CAMERAS=1 \
+        -v "${MINA_ROOT}/logs:/workspace/logs:rw" \
         -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
-        -v "${MINA_ROOT}/outputs:/workspace/outputs:rw" \
+        ${WANDB_API_KEY:+-e WANDB_API_KEY="${WANDB_API_KEY}"} \
+        ${WANDB_USERNAME:+-e WANDB_USERNAME="${WANDB_USERNAME}"} \
         "${CACHE_VOLS[@]}" \
         mina-bhl-training:latest \
-        isaaclab -p scripts/rsl_rl/play.py \
-            --task "$task" \
+        bash -c "isaaclab -p scripts/rsl_rl/play.py \
+            --task $task \
             --num_envs 64 \
-            --checkpoint "$checkpoint" \
             --video --video_length 500 \
-            --video_interval 1
+            ${extra_args}"
+}
+
+# ── ROS2 (Jazzy — policy inference + teleop) ──────────────────
+ROS_IMAGE="mina_desktop:jazzy"
+FASTDDS_XML="/home/mina/Mina/source/ros/fastdds.xml"
+ROS_DDS_ENV=(
+    "-e" "RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
+    "-e" "FASTRTPS_DEFAULT_PROFILES_FILE=${FASTDDS_XML}"
+)
+
+cmd_ros_policy() {
+    local config="${1:-/home/mina/Mina/configs/policy_latest.yaml}"
+    local host_config="${MINA_ROOT}/${config#/home/mina/Mina/}"
+    mkdir -p "${MINA_ROOT}/debug"
+
+    # Check that the ONNX referenced in the config exists
+    if [ -f "$host_config" ]; then
+        local onnx_path
+        onnx_path="$(grep '^policy_checkpoint_path:' "$host_config" | awk '{print $2}')"
+        # Convert container path to host path (handles /workspace/ and /home/mina/Mina/ prefixes)
+        local rel_path="${onnx_path#/workspace/}"
+        rel_path="${rel_path#/home/mina/Mina/}"
+        local host_onnx="${MINA_ROOT}/${rel_path}"
+        if [ -n "$onnx_path" ] && [ ! -f "$host_onnx" ]; then
+            echo "[Error] ONNX not found: $onnx_path (checked $host_onnx)" >&2
+            echo "        Re-run play.py to export a fresh policy and regenerate the config:" >&2
+            echo "        ./docker_mina/run.sh eval $TASK" >&2
+            exit 1
+        fi
+    fi
+
+    echo "==> Starting ROS2 policy node: config=$config ..."
+    docker run \
+        --name mina-ros-policy \
+        --rm -it \
+        --network host \
+        "${ROS_DDS_ENV[@]}" \
+        -v "${MINA_ROOT}:/home/mina/Mina:rw" \
+        -v "${MINA_ROOT}/logs:/workspace/logs:ro" \
+        -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
+        -w /home/mina/Mina \
+        "$ROS_IMAGE" \
+        python3 /home/mina/Mina/source/ros/play_isaacsim.py --config "$config"
+}
+
+cmd_ros_gamepad() {
+    echo "==> Starting ROS2 gamepad teleop ..."
+    docker run \
+        --name mina-ros-gamepad \
+        --rm -it \
+        --network host \
+        --privileged \
+        "${ROS_DDS_ENV[@]}" \
+        -v /dev/input:/dev/input:ro \
+        -v /run/udev:/run/udev:ro \
+        -v "${MINA_ROOT}:/home/mina/Mina:rw" \
+        "$ROS_IMAGE" \
+        python3 /home/mina/Mina/source/ros/gamepad_teleop.py "$@"
+}
+
+cmd_ros_shell() {
+    echo "==> Opening ROS2 Jazzy shell ..."
+    docker run \
+        --name mina-ros-shell \
+        --rm -it \
+        --network host \
+        "${ROS_DDS_ENV[@]}" \
+        -v "${MINA_ROOT}:/home/mina/Mina:rw" \
+        "$ROS_IMAGE" \
+        bash
 }
 
 # ── Apptainer (local Singularity testing) ─────────────────────
@@ -391,15 +427,14 @@ case "${1:-help}" in
     pull-base)      cmd_pull_base ;;
     build-base)     cmd_build_base ;;
     build-training) cmd_build_training ;;
-    build-streaming)cmd_build_streaming ;;
-    build-synthdata)cmd_build_synthdata ;;
-    build-deploy)   cmd_build_deploy ;;
     build-all)      cmd_build_all ;;
     dev)            cmd_dev ;;
     train)          shift; cmd_train "$@" ;;
     stream)         shift; cmd_stream "$@" ;;
-    synthdata)      shift; cmd_synthdata "$@" ;;
     eval)           shift; cmd_eval "$@" ;;
+    ros-policy)     shift; cmd_ros_policy "$@" ;;
+    ros-gamepad)    shift; cmd_ros_gamepad "$@" ;;
+    ros-shell)      cmd_ros_shell ;;
     apptainer-build)  shift; cmd_apptainer_build "$@" ;;
     apptainer-shell)  shift; cmd_apptainer_shell "$@" ;;
     apptainer-train)  shift; cmd_apptainer_train "$@" ;;

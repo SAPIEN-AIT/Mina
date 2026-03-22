@@ -110,12 +110,8 @@ Streaming reuses `mina-bhl-training` with runtime flag overrides. ROS2 inference
 ```
 
 ### Critical Docker rules
-1. **Dev container needs manual package install every fresh start:**
-   ```bash
-   /isaac-sim/python.sh -m pip install -e /workspace/source/berkeley_humanoid_lite_assets -q
-   /isaac-sim/python.sh -m pip install -e /workspace/source/berkeley_humanoid_lite -q
-   ```
-2. **Assets package must be installed BEFORE main package** (it's a dependency)
+1. **Dev container auto-installs source packages on startup** (`run.sh dev` runs pip installs before dropping into bash — no manual steps needed)
+2. **Assets package must be installed BEFORE main package** (it's a dependency — handled by install order in `run.sh`)
 3. **Use `isaaclab -p` wrapper**, never plain `python3`, for Isaac Lab tasks
 4. **`ENABLE_CAMERAS=1`** required for any video recording
 5. **Browser WebRTC streaming is broken** in this Isaac Lab version — use the native Streaming Client

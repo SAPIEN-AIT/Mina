@@ -35,6 +35,10 @@ _repo
 _build
 .lastformat
 
+# Secrets
+docker_mina/.env
+docker_mina/cluster/.env.cluster
+
 # --- Custom user additions ---
 
 # Ignore heavy C/C++ Intellisense databases inside .vscode

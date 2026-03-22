@@ -6,15 +6,16 @@
 
 ---
 
-## The five containers
+## The two containers
 
 | Container name | Base image | What it's for |
 |---|---|---|
 | `mina-isaaclab-base` | `isaac-lab:2.3.2` | Daily development — edit code on host, run inside container |
-| `mina-bhl-training` | `mina-isaaclab-base` | Headless RL training — code baked in, logs/checkpoints come out |
-| `mina-bhl-streaming` | `mina-bhl-training` | Watch a policy live via Isaac Sim Streaming Client (browser WebRTC demo is broken in this IsaacLab version) |
-| `mina-isaacsim-synthdata` | `isaac-sim:4.5.0` | Generate synthetic datasets — cameras on, no Lab RL overhead |
-| `mina-bhl-deploy` | `pytorch` | Run a trained policy on a real robot — no Isaac Sim at all |
+| `mina-bhl-training` | `mina-isaaclab-base` | Headless RL training, streaming, eval — code baked in, logs/checkpoints come out |
+
+Streaming visualization reuses `mina-bhl-training` with runtime flag overrides (`HEADLESS=0`, `LIVESTREAM=2`) — no separate image needed.
+
+ROS2 policy inference and teleop use the external `mina_desktop:jazzy` image (see ROS2 section below).
 
 ---
 
@@ -30,10 +31,10 @@ nano docker_mina/.env
 #    Get your key at: https://ngc.nvidia.com → top-right menu → Setup → Generate API Key
 ./docker_mina/run.sh ngc-login
 
-# 3. Pull the official NVIDIA base images (~20 GB total, takes a while)
+# 3. Pull the official NVIDIA base image (~15 GB, takes a while)
 ./docker_mina/run.sh pull-base
 
-# 4. Build all your images on top of those bases
+# 4. Build both images (base + training)
 ./docker_mina/run.sh build-all
 ```
 
@@ -210,8 +211,14 @@ The play script also writes a deploy config to `/workspace/configs/policy_latest
 
 ```bash
 cd /home/alex/dev/Mina
-./docker_mina/run.sh eval Velocity-Berkeley-Humanoid-Lite-Biped-v0 checkpoints/model_final.pt
-# Videos saved to /home/alex/dev/Mina/outputs/
+
+# Auto-detects latest checkpoint
+./docker_mina/run.sh eval Velocity-Berkeley-Humanoid-Lite-Biped-v0
+
+# With a specific checkpoint
+./docker_mina/run.sh eval Velocity-Berkeley-Humanoid-Lite-Biped-v0 model_3000.pt
+
+# Videos saved to logs/rsl_rl/<experiment>/<timestamp>/videos/play/
 ```
 
 ---
@@ -219,17 +226,18 @@ cd /home/alex/dev/Mina
 ### Visualising a policy (Streaming Client)
 
 Use this to watch a trained checkpoint live with the native Isaac Sim Streaming Client.
+Streaming reuses the `mina-bhl-training` image with runtime flag overrides — no separate image needed.
 
 **Compatibility note:** for the IsaacLab version used by this repo, the browser WebRTC demo page does not work reliably. Use the native client instead.
 
 ```bash
 cd /home/alex/dev/Mina
 
-# Local streaming
+# Local streaming (auto-picks latest checkpoint)
 ./docker_mina/run.sh stream
 
 # With a specific checkpoint
-./docker_mina/run.sh stream checkpoints/model_1000.pt
+./docker_mina/run.sh stream model_3000.pt
 
 # Then connect with the Isaac Sim Streaming Client to:
 #   127.0.0.1
@@ -243,40 +251,28 @@ For remote cloud GPUs, set `PUBLIC_IP` in `.env` to your machine's public IP, th
 #   <PUBLIC_IP>
 ```
 
-The streaming container automatically picks up the latest checkpoint from the latest training run if no checkpoint is specified.
+The stream command automatically picks up the latest checkpoint from the latest training run if no checkpoint is specified.
 
 ---
 
-### Synthetic data generation
+### ROS2 policy inference and teleop
 
-Use this for camera-based dataset generation. Runs pure Isaac Sim — no RL stack loaded.
-
-```bash
-cd /home/alex/dev/Mina
-# Generate 5000 scenes
-./docker_mina/run.sh synthdata 5000
-# Output saved to /home/alex/dev/Mina/outputs/
-```
-
----
-
-### Real-robot deployment
-
-The deploy image has no Isaac Sim — it's just PyTorch. Copy it to your robot's compute unit.
+These commands use the `mina_desktop:jazzy` image (ROS2 Jazzy + Python 3.12). The image auto-installs the `berkeley_humanoid_lite_lowlevel` package on startup.
 
 ```bash
 cd /home/alex/dev/Mina
 
-# Build it (bakes in checkpoints/model_final.pt)
-./docker_mina/run.sh build-deploy
+# Run ROS2 policy node (default config: configs/policy_latest.yaml)
+./docker_mina/run.sh ros-policy
 
-# Run on any machine with a GPU (Jetson, workstation, etc.)
-docker run --gpus all mina-bhl-deploy:latest
+# Run with custom config
+./docker_mina/run.sh ros-policy /home/mina/Mina/configs/my_config.yaml
 
-# Or override the checkpoint at runtime
-docker run --gpus all \
-    -v /path/to/model.pt:/workspace/model.pt \
-    mina-bhl-deploy:latest
+# Run gamepad → /cmd_vel bridge
+./docker_mina/run.sh ros-gamepad
+
+# Interactive shell in ROS2 container
+./docker_mina/run.sh ros-shell
 ```
 
 ---
@@ -296,9 +292,8 @@ cd /home/alex/dev/Mina
 ./docker_mina/run.sh clean
 
 # Rebuild a single image after code changes
-./docker_mina/run.sh build-training
-./docker_mina/run.sh build-streaming
 ./docker_mina/run.sh build-base
+./docker_mina/run.sh build-training
 ```
 
 ---
@@ -307,13 +302,13 @@ cd /home/alex/dev/Mina
 
 | You changed... | Rebuild needed |
 |---|---|
-| A file under `source/` (task code) | Only if using training/streaming — not needed in dev |
+| A file under `source/` (task code) | Only if using training — not needed in dev |
 | A file under `scripts/` | Same as above |
 | `docker_mina/.env` paths or versions | Yes, `build-all` |
 | A `Dockerfile.*` | Yes, that specific image |
 | Nothing — just re-running a training | No |
 
-**Rebuild order matters**: base → training → streaming (each depends on the one before).
+**Rebuild order matters**: base → training (training depends on base).
 
 ---
 
@@ -326,8 +321,9 @@ DAILY DEV         dev
 TRAIN             train [task] [num_envs]
 WATCH             stream [checkpoint]   (use Streaming Client, not browser demo)
 EVAL + VIDEO      eval [task] [checkpoint]
-SYNTH DATA        synthdata [num_scenes]
-REAL ROBOT        build-deploy → copy image → run on robot
+ROS2 INFERENCE    ros-policy [config]
+ROS2 TELEOP       ros-gamepad
+ROS2 DEBUG        ros-shell
 
 MAINTENANCE       list | stop | clean | build-<name>
 
@@ -434,50 +430,15 @@ docker run --name mina-training-play --rm --gpus all --network host --ipc host \
 
 **Check:** `videos/play/rl-video-step-0.mp4` and `exported/policy.{pt,onnx}` in the latest run dir
 
-### 5. Streaming container — play with livestream client
+### 5. Streaming via training image — play with livestream client
 
 ```bash
-docker run --name mina-streaming-play --rm --gpus all --network host --ipc host \
-  -e ACCEPT_EULA=Y -e PRIVACY_CONSENT=Y \
-  -e HEADLESS=0 -e LIVESTREAM=2 -e ENABLE_CAMERAS=1 \
-  -v "$PWD/logs:/workspace/logs:rw" \
-  -v "$PWD/checkpoints:/workspace/checkpoints:ro" \
-  -v "$PWD/configs:/workspace/configs:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/ov:/root/.cache/ov:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/pip:/root/.cache/pip:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw" \
-  -v "${HOME}/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw" \
-  -v "${HOME}/docker/isaac-sim/data:/root/.local/share/ov/data:rw" \
-  mina-bhl-streaming:latest \
-  bash -c "isaaclab -p scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-Biped-v0 --num_envs 4 --livestream 2"
+./docker_mina/run.sh stream
 ```
 
 **Check:** open the Isaac Sim Streaming Client and connect to `127.0.0.1`. You should see the humanoid running. `Ctrl+C` to stop.
 
-### 6. Streaming container — play with video
-
-```bash
-docker run --name mina-streaming-video --rm --gpus all --network host --ipc host \
-  -e ACCEPT_EULA=Y -e PRIVACY_CONSENT=Y -e HEADLESS=1 -e ENABLE_CAMERAS=1 \
-  -v "$PWD/logs:/workspace/logs:rw" \
-  -v "$PWD/checkpoints:/workspace/checkpoints:ro" \
-  -v "$PWD/configs:/workspace/configs:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/ov:/root/.cache/ov:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/pip:/root/.cache/pip:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw" \
-  -v "${HOME}/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw" \
-  -v "${HOME}/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw" \
-  -v "${HOME}/docker/isaac-sim/data:/root/.local/share/ov/data:rw" \
-  mina-bhl-streaming:latest \
-  bash -c "isaaclab -p scripts/rsl_rl/play.py --task Velocity-Berkeley-Humanoid-Lite-Biped-v0 --num_envs 4 --headless --video --video_length 20"
-```
-
-**Check:** `videos/play/rl-video-step-0.mp4` in the latest run dir
-
-### 7. Final verification
+### 6. Final verification
 
 ```bash
 echo "=== Train videos ===" && find logs/rsl_rl/biped -name "*.mp4" -path "*train*" | wc -l
@@ -500,7 +461,5 @@ echo "=== Checkpoints ===" && find logs/rsl_rl/biped -name "model_*.pt" | wc -l
 | Play/eval videos | `/home/alex/dev/Mina/logs/rsl_rl/<experiment>/<timestamp>/videos/play/` |
 | Exported policies | `/home/alex/dev/Mina/logs/rsl_rl/<experiment>/<timestamp>/exported/policy.{pt,onnx}` |
 | Deploy config | `/home/alex/dev/Mina/configs/policy_latest.yaml` |
-| Synthdata output | `/home/alex/dev/Mina/outputs/` |
-| Eval videos (via run.sh) | `/home/alex/dev/Mina/outputs/` |
 | Isaac Sim cache | `~/docker/isaac-sim/cache/` |
 | Omniverse logs | `~/docker/isaac-sim/logs/` |

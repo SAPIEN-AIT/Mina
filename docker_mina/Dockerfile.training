@@ -5,12 +5,8 @@
 # ============================================================
 FROM mina-isaaclab-base:latest
 
-# Copy and install all source packages
+# Copy source packages (packages already installed in base image via editable install)
 COPY source/ /workspace/source/
-RUN cd /workspace/source/berkeley_humanoid_lite_assets && \
-    /isaac-sim/python.sh -m pip install -e . --no-cache-dir && \
-    cd /workspace/source/berkeley_humanoid_lite && \
-    /isaac-sim/python.sh -m pip install -e . --no-cache-dir
     
 # Copy training scripts
 COPY scripts/ /workspace/scripts/

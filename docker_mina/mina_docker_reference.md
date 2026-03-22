@@ -9,36 +9,21 @@
 Every image builds on the one above it. You never modify NVIDIA's images.
 
 ```
-nvcr.io/nvidia/isaac-sim:4.5.0          ← NVIDIA (never touch)
+nvcr.io/nvidia/isaac-lab:2.3.2          ← NVIDIA (never touch)
          │
-         ├─── nvcr.io/nvidia/isaac-lab:2.3.2    ← NVIDIA (never touch)
-         │              │
-         │              └─── mina-isaaclab-base  ← Dockerfile.base
-         │                           │             adds: git, wget, vim
-         │                           │             adds: isaaclab CLI wrapper in PATH
-         │                           │
-         │                           └─── mina-bhl-training   ← Dockerfile.training
-         │                                        │             installs: berkeley_humanoid_lite_assets
-         │                                        │             installs: berkeley_humanoid_lite
-         │                                        │             bakes: source/, scripts/, configs/
-         │                                        │
-         │                                        └─── mina-bhl-streaming  ← Dockerfile.streaming
-         │                                                      adds: port EXPOSEs
-         │                                                      overrides: ENV LIVESTREAM=2
-         │
-         └─── mina-isaacsim-synthdata    ← Dockerfile.synthdata
-                                           skips Lab entirely
-                                           adds: ENABLE_CAMERAS=1
-
-pytorch/pytorch:2.3.0-cuda12.1          ← separate base, no Isaac Sim
-         │
-         └─── mina-bhl-deploy            ← Dockerfile.deploy
-                                           adds: deploy/ scripts + model.pt
+         └─── mina-isaaclab-base                 ← Dockerfile.base
+                        │                          adds: git, wget, vim
+                        │                          adds: isaaclab CLI wrapper in PATH
+                        │
+                        └─── mina-bhl-training   ← Dockerfile.training
+                                                   installs: berkeley_humanoid_lite_assets
+                                                   installs: berkeley_humanoid_lite
+                                                   bakes: source/, scripts/, configs/
 ```
 
-**Why `mina-bhl-streaming` builds FROM `mina-bhl-training`** and not from base: the streaming image needs your package already installed to run inference. Building from training means you don't duplicate the `pip install` step.
+Streaming visualization reuses `mina-bhl-training` at runtime with flag overrides (`HEADLESS=0`, `LIVESTREAM=2`, `ENABLE_CAMERAS=1`) — no separate Dockerfile needed.
 
-**Why `mina-isaacsim-synthdata` builds FROM `isaac-sim:4.5.0` directly** and not from the Lab image: Isaac Lab loads the full RL stack (managers, environments, gym registration) at import time. For data generation you only need Isaac Sim's rendering and USD APIs — skipping Lab saves ~2 GB of image size and several seconds of startup.
+ROS2 policy inference uses the external `mina_desktop:jazzy` image (ROS2 Jazzy + Python 3.12).
 
 ---
 
@@ -85,50 +70,6 @@ CMD ["bash", "-c", "isaaclab -p scripts/rsl_rl/train.py ..."]
 **`COPY` at build time** means the source code is frozen into the image layer. This is intentional for training — you want a reproducible snapshot, not a live-synced version that could change mid-run. The `pip install -e .` installs the package in editable mode inside the image so Python can find it as a module.
 
 **`CMD`** is the default command if you run the container without specifying one. You can always override it: `docker run mina-bhl-training:latest bash`.
-
----
-
-### `Dockerfile.streaming`
-
-```dockerfile
-FROM mina-bhl-training:latest
-EXPOSE 47995-48012/udp
-EXPOSE 49000-49007/udp
-EXPOSE 49100/tcp
-EXPOSE 8211/tcp
-ENV HEADLESS=0
-ENV LIVESTREAM=2
-ENV ENABLE_CAMERAS=1
-```
-
-`EXPOSE` is documentation — it tells Docker which ports the container intends to use. It doesn't actually open them; that happens at `docker run -p` time. The env var overrides here flip the training image from headless to streaming mode without duplicating any other layer.
-
----
-
-### `Dockerfile.synthdata`
-
-```dockerfile
-FROM nvcr.io/nvidia/isaac-sim:4.5.0
-ENV HEADLESS=1
-ENV ENABLE_CAMERAS=1
-COPY data_gen/ /workspace/data_gen/
-CMD ["/isaac-sim/python.sh", "data_gen/generate.py", ...]
-```
-
-Note the CMD uses `/isaac-sim/python.sh` not `python` — Isaac Sim ships its own Python interpreter with all Omniverse extensions pre-configured. Using the system Python would miss all the `omni.*` modules.
-
----
-
-### `Dockerfile.deploy`
-
-```dockerfile
-FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
-COPY deploy/ /workspace/deploy/
-COPY checkpoints/model_final.pt /workspace/model.pt
-CMD ["python", "deploy/run_policy.py", "--checkpoint", "/workspace/model.pt"]
-```
-
-This is the only image with no Isaac Sim dependency. The `pytorch:...-runtime` base is ~4 GB vs ~20 GB for Isaac Sim images. It can run on any CUDA-capable machine — Jetson Orin, cloud inference instance, workstation — without an NGC account or EULA.
 
 ---
 
@@ -226,16 +167,15 @@ The Isaac Lab framework source. Normally you don't need this — Isaac Lab is in
 
 ---
 
-### Output-only mounts (training, streaming, synthdata)
+### Output-only mounts (training, streaming, eval)
 
 ```
-${MINA_ROOT}/logs  →  /workspace/logs  (rw)          # training
-${MINA_ROOT}/checkpoints  →  /workspace/checkpoints (rw)  # training
-${MINA_ROOT}/checkpoints  →  /workspace/checkpoints (ro)  # streaming
-${MINA_ROOT}/outputs  →  /output  (rw)               # synthdata
+${MINA_ROOT}/logs  →  /workspace/logs  (rw)               # training + streaming + eval
+${MINA_ROOT}/checkpoints  →  /workspace/checkpoints (rw)   # training
+${MINA_ROOT}/checkpoints  →  /workspace/checkpoints (ro)   # streaming + eval (read-only)
 ```
 
-The `ro` (read-only) on the streaming checkpoint mount is a deliberate safety measure — a streaming container runs inference and should have no ability to modify your saved models.
+The `ro` (read-only) on the streaming checkpoint mount is a deliberate safety measure — streaming runs inference and should have no ability to modify your saved models.
 
 ---
 
@@ -269,7 +209,7 @@ PUBLIC_IP=x.x.x.x    Streaming client endpoint — set to your machine's public 
 | 0 | 0 | GUI window, no camera tensor data |
 | 0 | 1 | GUI window + camera tensors (local dev with vision) |
 | 1 | 0 | No window, no cameras — fastest, for state-based training |
-| 1 | 1 | No window, cameras active — for vision training, video recording, or synthdata |
+| 1 | 1 | No window, cameras active — for vision training, video recording |
 
 `LIVESTREAM=2` forces `HEADLESS=1` internally regardless of what you set.
 
@@ -318,7 +258,7 @@ docker compose --profile training up mina-bhl-training
 docker compose --profile dev up mina-isaaclab-base
 ```
 
-This prevents accidentally starting all four containers simultaneously and exhausting GPU memory.
+This prevents accidentally starting both containers simultaneously and exhausting GPU memory.
 
 ### `${VAR:-default}` syntax
 
@@ -336,7 +276,7 @@ Isaac Sim doesn't play well with Docker's default bridge networking. In bridge m
 
 `network_mode: host` collapses the container's network into the host's — the container sees the same interfaces, same IP, same ports as the host machine. The container can't be isolated from the host network, but for a local GPU workstation or a dedicated cloud training VM this is the right trade-off.
 
-Consequence: two containers with `network_mode: host` that both try to bind the same port will conflict. Don't run `mina-bhl-training` and `mina-bhl-streaming` simultaneously.
+Consequence: two containers with `network_mode: host` that both try to bind the same port will conflict. Don't run training and streaming simultaneously — they use the same image and ports.
 
 ---
 
@@ -378,9 +318,6 @@ Similarly, `docker-compose.yaml` uses `context: ..` and `dockerfile: docker_mina
 │   ├── docker-compose.yaml     ← service definitions
 │   ├── Dockerfile.base         ← builds mina-isaaclab-base
 │   ├── Dockerfile.training     ← builds mina-bhl-training
-│   ├── Dockerfile.streaming    ← builds mina-bhl-streaming
-│   ├── Dockerfile.synthdata    ← builds mina-isaacsim-synthdata
-│   ├── Dockerfile.deploy       ← builds mina-bhl-deploy
 │   ├── mina_docker_reference.md ← this file
 │   └── mina_docker_usage.md    ← usage guide
 │
@@ -404,8 +341,6 @@ Similarly, `docker-compose.yaml` uses `context: ..` and `dockerfile: docker_mina
 │       │       ├── params/      ← frozen config snapshots
 │       │       └── isaaclab/    ← Isaac Lab internal logs
 │       └── humanoid/            ← Velocity-Berkeley-Humanoid-Lite-v0 runs
-├── outputs/                     ← eval videos, synthetic datasets
-└── data_gen/                    ← synthdata generation scripts
 ```
 
 ```
