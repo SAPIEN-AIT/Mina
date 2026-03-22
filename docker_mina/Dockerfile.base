@@ -17,13 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir wandb
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir wandb onnxruntime inputs
 
 # Copy and install source packages (editable — bind-mounts at runtime override source)
 COPY source/berkeley_humanoid_lite_assets /workspace/source/berkeley_humanoid_lite_assets
 COPY source/berkeley_humanoid_lite /workspace/source/berkeley_humanoid_lite
+COPY source/berkeley_humanoid_lite_lowlevel /workspace/source/berkeley_humanoid_lite_lowlevel
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir -e /workspace/source/berkeley_humanoid_lite_assets \
-    && /isaac-sim/python.sh -m pip install --no-cache-dir -e /workspace/source/berkeley_humanoid_lite
+    && /isaac-sim/python.sh -m pip install --no-cache-dir -e /workspace/source/berkeley_humanoid_lite \
+    && /isaac-sim/python.sh -m pip install --no-cache-dir -e /workspace/source/berkeley_humanoid_lite_lowlevel
 
 # Make isaaclab CLI available on PATH
 ENV ISAACLAB_PATH=/workspace/isaaclab

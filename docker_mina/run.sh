@@ -69,6 +69,7 @@ RUN
   ./docker_mina/run.sh train [task] [n]   Headless training (task, num_envs)
   ./docker_mina/run.sh stream [ckpt]      Livestream policy (checkpoint path)
   ./docker_mina/run.sh eval [task] [ckpt] Headless evaluation with video
+  ./docker_mina/run.sh sim2sim [config]   Standalone Isaac Sim sim2sim (gamepad enabled)
 
 ROS2 (Jazzy — policy inference + teleop, uses mina_desktop:jazzy)
   ./docker_mina/run.sh ros-policy [config]         Run ROS2 policy node (default: configs/policy_latest.yaml)
@@ -145,12 +146,7 @@ cmd_dev() {
         ${WANDB_API_KEY:+-e WANDB_API_KEY="${WANDB_API_KEY}"} \
         ${WANDB_USERNAME:+-e WANDB_USERNAME="${WANDB_USERNAME}"} \
         mina-isaaclab-base:latest \
-        bash -c "
-            echo '==> Installing berkeley_humanoid_lite_lowlevel ...'
-            /isaac-sim/python.sh -m pip install -q --no-cache-dir -e /workspace/source/berkeley_humanoid_lite_lowlevel
-            echo '==> Done. Entering dev shell.'
-            exec /bin/bash
-        "
+        /bin/bash
 }
 
 # ── mina-bhl-training — headless RL training ─────────────────
@@ -182,7 +178,7 @@ cmd_train() {
 cmd_stream() {
     local extra_args=""
     if [ -n "${1:-}" ]; then
-        extra_args="--checkpoint $1"
+        extra_args="--load_run ${1} --checkpoint ${2:-model_*.pt}"
     fi
     echo "==> Starting streaming (mina-bhl-training + play.py) ..."
     echo "    Connect via Isaac Sim Streaming Client → ${PUBLIC_IP}"
@@ -215,7 +211,7 @@ cmd_eval() {
     local task="${1:-$TASK}"
     local extra_args=""
     if [ -n "${2:-}" ]; then
-        extra_args="--checkpoint $2"
+        extra_args="--load_run ${2} --checkpoint ${3:-model_*.pt}"
     fi
     echo "==> Starting headless eval: task=$task ..."
     docker run \
@@ -239,6 +235,36 @@ cmd_eval() {
             --num_envs 64 \
             --video --video_length 500 \
             ${extra_args}"
+}
+
+# ── Standalone Isaac Sim sim2sim ─────────────────────────────
+cmd_sim2sim() {
+    local config="${1:-configs/policy_latest.yaml}"
+    echo "==> Starting sim2sim (mina-bhl-training + gamepad) ..."
+    echo "    Config: $config"
+    echo "    Connect via Isaac Sim Streaming Client → ${PUBLIC_IP}"
+    docker run \
+        --name mina-sim2sim \
+        --rm -it \
+        --gpus all \
+        --network host \
+        --ipc host \
+        --privileged \
+        -e ACCEPT_EULA=Y \
+        -e PRIVACY_CONSENT=Y \
+        -e LIVESTREAM=2 \
+        -e ENABLE_CAMERAS=1 \
+        -e ISAACLAB_PATH=/workspace/isaaclab \
+        -e PYTHONPATH="/workspace/source/berkeley_humanoid_lite_lowlevel:/workspace/source/berkeley_humanoid_lite:/workspace/source/berkeley_humanoid_lite_assets" \
+        -v "${MINA_ROOT}/source:/workspace/source:rw" \
+        -v "${MINA_ROOT}/scripts:/workspace/scripts:rw" \
+        -v "${MINA_ROOT}/configs:/workspace/configs:ro" \
+        -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
+        -v /dev/input:/dev/input:ro \
+        "${CACHE_VOLS[@]}" \
+        mina-bhl-training:latest \
+        bash -c "isaaclab -p -m pip install -q onnxruntime omegaconf inputs && \
+                 isaaclab -p scripts/sim2sim/play_isaacsim.py --config $config"
 }
 
 # ── ROS2 (Jazzy — policy inference + teleop) ──────────────────
@@ -432,6 +458,7 @@ case "${1:-help}" in
     train)          shift; cmd_train "$@" ;;
     stream)         shift; cmd_stream "$@" ;;
     eval)           shift; cmd_eval "$@" ;;
+    sim2sim)        shift; cmd_sim2sim "$@" ;;
     ros-policy)     shift; cmd_ros_policy "$@" ;;
     ros-gamepad)    shift; cmd_ros_gamepad "$@" ;;
     ros-shell)      cmd_ros_shell ;;

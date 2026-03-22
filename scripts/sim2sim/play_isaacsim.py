@@ -15,16 +15,22 @@ import os
 
 import numpy as np
 
-# ── Isaac Sim must be launched before any other Omni import ─────────────
-from isaacsim import SimulationApp
+# ── AppLauncher must come first — it sets up the kit framework and handles
+#    LIVESTREAM automatically (same path play.py takes, so streaming works).
+from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Isaac Sim sim2sim playback (no ROS)")
 parser.add_argument("--config", type=str, default="./configs/policy_humanoid.yaml",
                     help="Path to policy configuration YAML")
-parser.add_argument("--headless", action="store_true", help="Run without GUI")
+AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
-simulation_app = SimulationApp({"headless": args.headless})
+app_launcher = AppLauncher(args)
+simulation_app = app_launcher.app
+
+# omni.isaac.core is not in the gym headless kit — enable it explicitly.
+import omni.kit.app
+omni.kit.app.get_app().get_extension_manager().set_extension_enabled_immediate("omni.isaac.core", True)
 
 # ── Now safe to import Omni / Isaac Sim modules ─────────────────────────
 from omni.isaac.core import World
