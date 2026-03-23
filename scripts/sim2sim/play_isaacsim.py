@@ -40,7 +40,7 @@ from omni.isaac.core.utils.types import ArticulationAction
 
 from omegaconf import OmegaConf
 from berkeley_humanoid_lite_lowlevel.policy.rl_controller import RlController
-from berkeley_humanoid_lite_lowlevel.policy.gamepad import Se2Gamepad
+from berkeley_humanoid_lite_lowlevel.policy.gamepad import Se2Gamepad, XInputEntry
 
 
 # ── Robot USD paths (relative to project root) ──────────────────────────
@@ -56,7 +56,8 @@ ROBOT_USD = {
 ROBOT_PRIM = "/World/Robot"
 SPAWN_HEIGHT = 0.0  # metres — match Isaac Lab training (PhysX resolves ground penetration)
 
-# Isaac Lab trains at 0.005s physics dt with decimation=8 → 25 Hz policy.
+# Isaac Sim costs ~8ms/step. Training used 0.005s (8 substeps).
+# In practice this gives ~10-15 Hz — acceptable for streaming.
 SIM_PHYSICS_DT = 0.005
 
 
@@ -211,8 +212,10 @@ def main():
     action_indices = list(cfg.action_indices)
     physics_substeps = int(np.round(cfg.policy_dt / SIM_PHYSICS_DT))
     first_tick = True
+    prev_start = False
 
     print(f"Policy: {1.0/cfg.policy_dt:.0f} Hz | Physics: {1.0/SIM_PHYSICS_DT:.0f} Hz | Substeps: {physics_substeps}")
+    loop_times = []
 
     # ── Main loop ────────────────────────────────────────────────────
     try:
@@ -226,6 +229,18 @@ def main():
                 cmd_vel[0] = gp["velocity_x"]
                 cmd_vel[1] = gp["velocity_y"] * 0.5
                 cmd_vel[2] = gp["velocity_yaw"]
+
+                start_pressed = bool(gamepad._states.get(XInputEntry.BTN_START))
+                if start_pressed and not prev_start:
+                    robot.set_world_pose(np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0, 0.0]))
+                    robot.set_joint_positions(art_positions)
+                    robot.set_joint_velocities(np.zeros(num_dofs, dtype=np.float32))
+                    robot.set_linear_velocity(np.zeros(3, dtype=np.float32))
+                    robot.set_angular_velocity(np.zeros(3, dtype=np.float32))
+                    controller.policy_observations[:] = 0
+                    cmd_vel[:] = 0
+                    print("Reset.")
+                prev_start = start_pressed
 
             art_joint_pos = robot.get_joint_positions()
             art_joint_vel = robot.get_joint_velocities()
@@ -272,6 +287,9 @@ def main():
             world.render()
 
             elapsed = time.perf_counter() - step_start
+            loop_times.append(elapsed)
+            if len(loop_times) % 25 == 0:
+                print(f"Loop: {1.0/np.mean(loop_times[-25:]):.1f} Hz (target: {1.0/cfg.policy_dt:.0f} Hz)")
             remaining = cfg.policy_dt - elapsed
             if remaining > 0:
                 time.sleep(remaining)

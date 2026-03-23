@@ -15,6 +15,7 @@ import argparse
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Imu, JointState
 from omegaconf import OmegaConf
@@ -84,23 +85,30 @@ class HumanoidPolicyNode(Node):
         self._tick = 0
 
         # QoS — sensor subscriptions: BEST_EFFORT so we drop stale messages
-        sensor_qos = rclpy.qos.QoSProfile(
-            reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,
-            durability=rclpy.qos.DurabilityPolicy.VOLATILE,
-            history=rclpy.qos.HistoryPolicy.KEEP_LAST,
-            depth=1,
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=2,
+        )
+        # QoS — velocity commands: RELIABLE, small queue
+        cmd_vel_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=2,
         )
         # QoS — command publisher: RELIABLE to match Isaac Sim's subscriber
-        cmd_qos = rclpy.qos.QoSProfile(
-            reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
-            durability=rclpy.qos.DurabilityPolicy.VOLATILE,
-            history=rclpy.qos.HistoryPolicy.KEEP_LAST,
-            depth=1,
+        cmd_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=2,
         )
 
         # Subscriptions
         self.create_subscription(Twist, args.cmd_vel_topic,
-                                 self._cmd_vel_callback, 10)
+                                 self._cmd_vel_callback, cmd_vel_qos)
         self.create_subscription(JointState, args.joint_states_topic,
                                  self._joint_states_callback, sensor_qos)
         self.create_subscription(Imu, args.imu_topic,
@@ -113,8 +121,8 @@ class HumanoidPolicyNode(Node):
         self.create_timer(cfg.policy_dt, self._policy_callback)
 
         # Log files
-        self._actions_log = open("debug/policy_actions_isaacsim.log", "w")
-        self._obs_log = open("debug/policy_observations_isaacsim.log", "w")
+        #self._actions_log = open("debug/policy_actions_isaacsim.log", "w")
+        #self._obs_log = open("debug/policy_observations_isaacsim.log", "w")
 
         self.get_logger().info(
             f"Policy node ready | policy_rate: {1.0/cfg.policy_dt:.0f} Hz | "
@@ -222,16 +230,16 @@ class HumanoidPolicyNode(Node):
             obs = self._build_observation()
 
         # Log observation
-        self._obs_log.write(f"{obs.tolist()}\n")
-        self._obs_log.flush()
+        #self._obs_log.write(f"{obs.tolist()}\n")
+        #self._obs_log.flush()
 
         # Run ONNX policy — identical to play_mujoco.py
         actions = self._controller.update(obs)
 
         # Log actions
-        if actions is not None:
-            self._actions_log.write(f"{actions.tolist()}\n")
-            self._actions_log.flush()
+        #if actions is not None:
+         #   self._actions_log.write(f"{actions.tolist()}\n")
+            #self._actions_log.flush()
 
         if actions is None:
             self._publish_positions(self._default_joint_positions)
@@ -243,14 +251,14 @@ class HumanoidPolicyNode(Node):
             target_positions[idx] = actions[i]
 
         # Periodic debug log
-        self._tick += 1
-        if self._tick % 25 == 1:
-            deltas = target_positions - self._default_joint_positions
-            max_delta = np.max(np.abs(deltas))
-            self.get_logger().info(
-                f"[tick={self._tick}] max_delta={max_delta:.4f} | "
-                f"quat={self._base_quat} | cmd_vel={self._cmd_vel}"
-            )
+        #self._tick += 1
+        #if self._tick % 25 == 1:
+        #    deltas = target_positions - self._default_joint_positions
+        #    max_delta = np.max(np.abs(deltas))
+        #    self.get_logger().info(
+        #        f"[tick={self._tick}] max_delta={max_delta:.4f} | "
+        #        f"quat={self._base_quat} | cmd_vel={self._cmd_vel}"
+        #    )
 
         self._publish_positions(target_positions)
 
@@ -268,8 +276,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node._actions_log.close()
-        node._obs_log.close()
+        #node._actions_log.close()
+        #node._obs_log.close()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

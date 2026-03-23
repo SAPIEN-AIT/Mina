@@ -1,18 +1,34 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles" >
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+
+    <!-- UDP-only transport: disables shared memory to prevent buffer explosion
+         when Isaac Sim (host) and ROS2 nodes (Docker) share the same DDS graph -->
     <transport_descriptors>
         <transport_descriptor>
             <transport_id>UdpTransport</transport_id>
             <type>UDPv4</type>
+            <sendBufferSize>2097152</sendBufferSize>    <!-- 2 MB send buffer -->
+            <receiveBufferSize>2097152</receiveBufferSize> <!-- 2 MB receive buffer -->
         </transport_descriptor>
     </transport_descriptors>
 
-    <participant profile_name="udp_transport_profile" is_default_profile="true">
+    <participant profile_name="default_profile" is_default_profile="true">
         <rtps>
             <userTransports>
                 <transport_id>UdpTransport</transport_id>
             </userTransports>
-            <useBuiltinTransports>false</useBuiltinTransports>
+            <useBuiltinTransports>false</useBuiltinTransports> <!-- disable shared memory -->
         </rtps>
     </participant>
+
+    <!-- Preallocated + realloc: avoids dynamic allocation per-message while still
+         growing if a payload exceeds the initial estimate -->
+    <data_writer profile_name="default_writer" is_default_profile="true">
+        <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+    </data_writer>
+
+    <data_reader profile_name="default_reader" is_default_profile="true">
+        <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+    </data_reader>
+
 </profiles>

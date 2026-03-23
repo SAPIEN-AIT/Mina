@@ -66,12 +66,15 @@ BUILD (run once, then after code changes)
 
 RUN
   ./docker_mina/run.sh dev                Enter dev container (live code sync)
-  ./docker_mina/run.sh train [task] [n]   Headless training (task, num_envs)
-  ./docker_mina/run.sh stream [ckpt]      Livestream policy (checkpoint path)
-  ./docker_mina/run.sh eval [task] [ckpt] Headless evaluation with video
-  ./docker_mina/run.sh sim2sim [config]   Standalone Isaac Sim sim2sim (gamepad enabled)
+  ./docker_mina/run.sh train [task] [n]                Headless training (task, num_envs)
+  ./docker_mina/run.sh stream [exp] [run]             WebRTC livestream policy
+  ./docker_mina/run.sh eval [task] [exp] [run]        Headless evaluation with video
+  ./docker_mina/run.sh play-local [task] [exp] [run]  Local GUI window (40 Hz, no streaming)
+  ./docker_mina/run.sh play-headless [task] [exp] [run] Headless play (fastest, no render)
+  ./docker_mina/run.sh sim2sim [config]               Standalone Isaac Sim sim2sim (gamepad)
 
 ROS2 (Jazzy — policy inference + teleop, uses mina_desktop:jazzy)
+  ./docker_mina/run.sh isaacsim                    Launch Isaac Sim (host) with FastDDS UDP env
   ./docker_mina/run.sh ros-policy [config]         Run ROS2 policy node (default: configs/policy_latest.yaml)
   ./docker_mina/run.sh ros-gamepad [--verbose]      Run gamepad → /cmd_vel bridge
   ./docker_mina/run.sh ros-shell                   Interactive shell in ROS2 container
@@ -176,9 +179,10 @@ cmd_train() {
 
 # ── mina-bhl-streaming — WebRTC visualization ────────────────
 cmd_stream() {
+    # Usage: stream [experiment_name] [run_timestamp]
     local extra_args=""
     if [ -n "${1:-}" ]; then
-        extra_args="--load_run ${1} --checkpoint ${2:-model_*.pt}"
+        extra_args="--experiment_name ${1} --load_run ${2:-}"
     fi
     echo "==> Starting streaming (mina-bhl-training + play.py) ..."
     echo "    Connect via Isaac Sim Streaming Client → ${PUBLIC_IP}"
@@ -196,6 +200,7 @@ cmd_stream() {
         -e PUBLIC_IP="$PUBLIC_IP" \
         -e FASTRTPS_DEFAULT_PROFILES_FILE=/workspace/source/ros/fastdds.xml \
         -v "${MINA_ROOT}/source/ros/fastdds.xml:/workspace/source/ros/fastdds.xml:ro" \
+        -v "${MINA_ROOT}/scripts:/workspace/scripts:rw" \
         -v "${MINA_ROOT}/logs:/workspace/logs:rw" \
         -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
         "${CACHE_VOLS[@]}" \
@@ -208,10 +213,11 @@ cmd_stream() {
 
 # ── headless eval with video ──────────────────────────────────
 cmd_eval() {
+    # Usage: eval [task] [experiment_name] [run_timestamp]
     local task="${1:-$TASK}"
     local extra_args=""
     if [ -n "${2:-}" ]; then
-        extra_args="--load_run ${2} --checkpoint ${3:-model_*.pt}"
+        extra_args="--experiment_name ${2} --load_run ${3:-}"
     fi
     echo "==> Starting headless eval: task=$task ..."
     docker run \
@@ -224,6 +230,8 @@ cmd_eval() {
         -e PRIVACY_CONSENT=Y \
         -e HEADLESS=1 \
         -e ENABLE_CAMERAS=1 \
+        -v "${MINA_ROOT}/scripts:/workspace/scripts:rw" \
+        -v "${MINA_ROOT}/configs:/workspace/configs:rw" \
         -v "${MINA_ROOT}/logs:/workspace/logs:rw" \
         -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
         ${WANDB_API_KEY:+-e WANDB_API_KEY="${WANDB_API_KEY}"} \
@@ -260,6 +268,7 @@ cmd_sim2sim() {
         -v "${MINA_ROOT}/scripts:/workspace/scripts:rw" \
         -v "${MINA_ROOT}/configs:/workspace/configs:ro" \
         -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
+        -v "${MINA_ROOT}/logs:/workspace/logs:ro" \
         -v /dev/input:/dev/input:ro \
         "${CACHE_VOLS[@]}" \
         mina-bhl-training:latest \
@@ -267,9 +276,76 @@ cmd_sim2sim() {
                  isaaclab -p scripts/sim2sim/play_isaacsim.py --config $config"
 }
 
+# ── play.py local GUI (X11, no WebRTC) ───────────────────────
+cmd_play_local() {
+    local task="${1:-Velocity-Berkeley-Humanoid-Lite-v0}"
+    local extra_args=""
+    if [ -n "${2:-}" ]; then
+        extra_args="--experiment_name ${2} --load_run ${3:-}"
+    fi
+    echo "==> play-local: task=$task (X11 window, no streaming)"
+    echo "    Allowing Docker X11 access..."
+    xhost +local:docker 2>/dev/null || true
+    docker run \
+        --name mina-bhl-play-local \
+        --rm -it \
+        --gpus all \
+        --network host \
+        --ipc host \
+        -e ACCEPT_EULA=Y \
+        -e PRIVACY_CONSENT=Y \
+        -e HEADLESS=0 \
+        -e LIVESTREAM=0 \
+        -e ENABLE_CAMERAS=0 \
+        -e DISPLAY="${DISPLAY:-:0}" \
+        -e NVIDIA_DRIVER_CAPABILITIES=all \
+        -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+        -v "${MINA_ROOT}/scripts:/workspace/scripts:rw" \
+        -v "${MINA_ROOT}/logs:/workspace/logs:rw" \
+        -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
+        -v /dev/input:/dev/input:ro \
+        "${CACHE_VOLS[@]}" \
+        mina-bhl-training:latest \
+        bash -c "isaaclab -p scripts/rsl_rl/play.py \
+            --task $task \
+            --num_envs 1 \
+            ${extra_args}"
+}
+
+# ── play.py fully headless (no render, fastest) ───────────────
+cmd_play_headless() {
+    local task="${1:-Velocity-Berkeley-Humanoid-Lite-v0}"
+    local extra_args=""
+    if [ -n "${2:-}" ]; then
+        extra_args="--experiment_name ${2} --load_run ${3:-}"
+    fi
+    echo "==> play-headless: task=$task (no render)"
+    docker run \
+        --name mina-bhl-play-headless \
+        --rm -it \
+        --gpus all \
+        --network host \
+        --ipc host \
+        -e ACCEPT_EULA=Y \
+        -e PRIVACY_CONSENT=Y \
+        -e HEADLESS=1 \
+        -e LIVESTREAM=0 \
+        -e ENABLE_CAMERAS=0 \
+        -v "${MINA_ROOT}/scripts:/workspace/scripts:rw" \
+        -v "${MINA_ROOT}/logs:/workspace/logs:rw" \
+        -v "${MINA_ROOT}/checkpoints:/workspace/checkpoints:ro" \
+        "${CACHE_VOLS[@]}" \
+        mina-bhl-training:latest \
+        bash -c "isaaclab -p scripts/rsl_rl/play.py \
+            --task $task \
+            --num_envs 1 \
+            ${extra_args}"
+}
+
 # ── ROS2 (Jazzy — policy inference + teleop) ──────────────────
 ROS_IMAGE="mina_desktop:jazzy"
 FASTDDS_XML="/home/mina/Mina/source/ros/fastdds.xml"
+ISAACSIM_PATH="${ISAACSIM_PATH:-$HOME/isaacsim}"
 ROS_DDS_ENV=(
     "-e" "RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
     "-e" "FASTRTPS_DEFAULT_PROFILES_FILE=${FASTDDS_XML}"
@@ -323,6 +399,25 @@ cmd_ros_gamepad() {
         -v "${MINA_ROOT}:/home/mina/Mina:rw" \
         "$ROS_IMAGE" \
         python3 /home/mina/Mina/source/ros/gamepad_teleop.py "$@"
+}
+
+cmd_isaacsim() {
+    local host_fastdds="${MINA_ROOT}/source/ros/fastdds.xml"
+    if [ ! -f "$host_fastdds" ]; then
+        echo "[Error] fastdds.xml not found: $host_fastdds" >&2
+        exit 1
+    fi
+    if [ ! -f "${ISAACSIM_PATH}/isaac-sim.sh" ]; then
+        echo "[Error] isaac-sim.sh not found: ${ISAACSIM_PATH}/isaac-sim.sh" >&2
+        echo "        Set ISAACSIM_PATH to your Isaac Sim install directory." >&2
+        exit 1
+    fi
+    echo "==> Launching Isaac Sim with FastDDS UDP transport ..."
+    echo "    DDS profile: $host_fastdds"
+    echo "    Isaac Sim:   ${ISAACSIM_PATH}/isaac-sim.sh"
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$host_fastdds"
+    exec "${ISAACSIM_PATH}/isaac-sim.sh"
 }
 
 cmd_ros_shell() {
@@ -459,6 +554,9 @@ case "${1:-help}" in
     stream)         shift; cmd_stream "$@" ;;
     eval)           shift; cmd_eval "$@" ;;
     sim2sim)        shift; cmd_sim2sim "$@" ;;
+    play-local)     shift; cmd_play_local "$@" ;;
+    play-headless)  shift; cmd_play_headless "$@" ;;
+    isaacsim)       cmd_isaacsim ;;
     ros-policy)     shift; cmd_ros_policy "$@" ;;
     ros-gamepad)    shift; cmd_ros_gamepad "$@" ;;
     ros-shell)      cmd_ros_shell ;;

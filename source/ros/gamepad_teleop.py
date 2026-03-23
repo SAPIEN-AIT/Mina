@@ -15,6 +15,7 @@ import sys
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Twist
 
 # Fix inputs library bug: module-level DeviceManager() crashes on LED parsing
@@ -47,7 +48,14 @@ class GamepadTeleopNode(Node):
     def __init__(self, topic: str = "/cmd_vel", rate: float = 50.0, verbose: bool = False):
         super().__init__("gamepad_teleop")
 
-        self._publisher = self.create_publisher(Twist, topic, 10)
+        # QoS — must be RELIABLE to match policy node's /cmd_vel subscriber
+        cmd_vel_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=2,
+        )
+        self._publisher = self.create_publisher(Twist, topic, cmd_vel_qos)
         self._timer = self.create_timer(1.0 / rate, self._timer_callback)
         self._verbose = verbose
 
